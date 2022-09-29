@@ -1,0 +1,10 @@
+/.idea
+/test
+/debugging-ebook
+__pycache__
+/venv
+/build
+/dist
+/ebsco_dl.egg-info
+EbscoDownloader.log
+analyse_js

@@ -1,0 +1,35 @@
+{
+    "editor.formatOnSave": true,
+    "python.linting.enabled": true,
+    "python.linting.lintOnSave": true,
+    "python.linting.pylintEnabled": true,
+    "python.linting.pylintArgs": [
+        "--enable=W0614",
+        "--enable=W0611",
+        "--disable=C0103",
+        "--disable=C0111",
+        "--disable=C0114",
+        "--disable=C0115",
+        "--disable=C0116",
+        "--disable=W0223",
+        "--disable=raise-missing-from",
+        "--disable=unnecessary-pass",
+        "--max-line-length=120"
+    ],
+    "python.linting.flake8Enabled": true,
+    "python.linting.flake8Args": [
+        "--max-line-length=120",
+        "--ignore=E203,E266,W503",
+    ],
+    "python.formatting.provider": "black",
+    "python.formatting.blackArgs": [
+        "--line-length",
+        "120",
+        "--target-version",
+        "py38",
+        "--skip-string-normalization"
+    ],
+    "editor.rulers": [
+        120
+    ]
+}

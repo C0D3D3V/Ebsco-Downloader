@@ -7,15 +7,13 @@ import logging
 import argparse
 import traceback
 
-from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
 import ebsco_dl.utils.process_lock as process_lock
 
 from ebsco_dl.utils.logger import Log
 from ebsco_dl.version import __version__
-from ebsco_dl.download_service.page_links_dowmloader import PageLinksDownloader
-from ebsco_dl.config_service.config_helper import ConfigHelper
+from ebsco_dl.download_service.page_links_downloader import PageLinksDownloader
 
 IS_DEBUG = False
 IS_VERBOSE = False

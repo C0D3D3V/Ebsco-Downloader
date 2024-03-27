@@ -28,13 +28,6 @@ class ReRaiseOnError(logging.StreamHandler):
             raise record.exception
 
 
-def run_download_pages(storage_path: str, download_url: str, skip_cert_verify: bool):
-    Log.debug('Start downloading all Pages...')
-    crawler = EbscoDownloader(storage_path, download_url, skip_cert_verify)
-    result = crawler.run()
-    if result is None:
-        Log.success('Downloading all Pages finished')
-
 
 def setup_logger(storage_path: str, verbose=False):
     global IS_VERBOSE
@@ -114,19 +107,16 @@ def get_parser():
     Creates a new argument parser.
     """
     parser = argparse.ArgumentParser(description=('Ebsco Downloader - A collection of tools to download ebooks'))
-    group = parser.add_mutually_exclusive_group(required=True)
 
-    group.add_argument(
+    parser.add_argument(
         '--version', action='version', version='ebsco-dl ' + __version__, help='Print program version and exit'
     )
 
-    group.add_argument(
-        '-dp',
-        '--download-pages',
-        default=None,
+    parser.add_argument(
+        'url',
         nargs=1,
         type=_is_url,
-        help=('Downloads all pages from all catergories if not other defined'),
+        help=('URL of the book that should be downloaded'),
     )
 
     parser.add_argument(
@@ -195,8 +185,7 @@ def main(args=None):
         if not IS_DEBUG:
             ProcessLock.lock(storage_path)
 
-        if args.download_pages is not None and len(args.download_pages) == 1:
-            run_download_pages(storage_path, args.download_pages[0], skip_cert_verify)
+        EbscoDownloader(storage_path, args.url[0], skip_cert_verify).run()
 
         Log.success('All done. Exiting..')
         ProcessLock.unlock(storage_path)

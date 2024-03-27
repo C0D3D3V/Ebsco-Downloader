@@ -15,6 +15,8 @@ from requests.sessions import Session
 import certifi
 import urllib3
 import requests
+import pypdf
+
 
 from ebsco_dl.utils import Log, SslHelper, PathTools, recursive_urlencode
 
@@ -165,7 +167,92 @@ class EbscoDownloader:
         return self.replace_equals_with_count(book_id)
 
     def download_pdf(self, ebsco_url:EBSCO_URL, session: Session):
-        pass
+        # Ground truth is version 18.842.0.1477 of EBSCO, I did not implement this on older versions 
+
+        # First we retrieve the book info json
+        book_info_data = recursive_urlencode(
+            {
+                'sid': ebsco_url.session_id,
+                'vid': ebsco_url.vid,
+                'theFormat': ebsco_url.book_format,
+            }
+        )
+        book_info_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+                        + f'/ehost/ebookViewer/DigitalObject/{ebsco_url.book_id}?{book_info_data}')
+
+        Log.info(f'Loading book info: `{book_info_url}`')
+        response = session.get(
+            book_info_url,
+            headers=self.stdHeader,
+            verify=(not self.skip_cert_verify),
+            allow_redirects=True,
+            timeout=60,
+        )
+
+        book_info_json = json.loads(response.text)
+        # all_content_entries = book_info_json.get('contents', {}).get('lp_Cover', {})
+        all_pages = book_info_json.get('pageData', [])
+        all_pages_ids = []
+        for page in all_pages:
+            page_artifactId = page.get('artifactId')
+            page_artifactId = page_artifactId.split('#')[0]
+            if page_artifactId not in all_pages_ids:
+                all_pages_ids.append(page_artifactId)
+
+        # Extract Meta data
+        book_title = book_info_json.get('title', 'untitled')
+        authors = book_info_json.get('authors', 'anonymous')
+        if isinstance(authors, str):
+            authors = authors.split(', ')
+        publicationYear = book_info_json.get('publicationYear', '1970')
+        language = self.first_match(r'"Language"\s*:\s*"([^"]+)"', 
+                                    ebsco_url.base_webview, 'Language of book', 'eng')
+
+        # Start downloading Artifacts
+        book_directory = PathTools.path_of_book(self.storage_path, book_title)
+        os.makedirs(str(book_directory), exist_ok=True)
+
+        pdf_content_files = []
+        for page_id in all_pages_ids:
+            page_filename = page_id.rsplit('/', 1)[1]
+            artifact_file_path = str(book_directory / page_filename)
+            pdf_content_files.append(book_directory / page_filename)
+            if os.path.isfile(artifact_file_path):
+                continue
+
+            artifact_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+                        + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
+                        + f'/{ebsco_url.session_id}/0/{page_id}')
+
+            Log.info(f'Loading artifact url: `{artifact_url}`')
+            response = session.get(
+                artifact_url,
+                headers=self.stdHeader,
+                verify=(not self.skip_cert_verify),
+                allow_redirects=True,
+                timeout=60,
+            )
+
+            if not response.ok or response.url != artifact_url:
+                raise RuntimeError(f'We cot rate limited! {response.reason}')
+
+            Log.info(f'Loaded artifact')
+
+            # Save Artifact to disk
+            with open(artifact_file_path, 'wb') as fs:
+                fs.write(response.content)
+
+        Log.info('Merging pdf artifacts to one pdf')
+        merger = pypdf.PdfMerger()
+        for idx, pdf_page in enumerate(pdf_content_files):
+            merger.append(pdf_page)
+            Log.info(f'Merged artifact {idx}')
+
+        Log.info(f'Writing PDF to disk (this can take long for big PDFs)')
+        merger.write(str(book_directory) + '.pdf')
+        
+        
+
     
     @staticmethod
     def decrypt(data_base64, key_base64, iv_base_64):
@@ -199,6 +286,7 @@ class EbscoDownloader:
 
     def download_epub(self, ebsco_url:EBSCO_URL, session: Session):
         # Ground truth is version 18.842.0.1477 of EBSCO, for older EBSCO version use older versions of ebsco-dl 
+        # https://github.com/C0D3D3V/Ebsco-Downloader/tree/5ce8f159975b9e544bc8d425f96b16591a2b057e
 
         # First we retrieve the book info json
         book_info_data = recursive_urlencode(
@@ -229,9 +317,8 @@ class EbscoDownloader:
         book_title = book_info_json.get('title', 'untitled')
         authors = book_info_json.get('authors', 'anonymous')
         if isinstance(authors, str):
-            authors = [authors]
+            authors = authors.split(', ')
         publicationYear = book_info_json.get('publicationYear', '1970')
-
         language = self.first_match(r'"Language"\s*:\s*"([^"]+)"', 
                                     ebsco_url.base_webview, 'Language of book', 'en')
 

@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # coding=utf-8
 
+import argparse
+import logging
 import os
 import sys
-import logging
-import argparse
 import traceback
-
 from logging.handlers import RotatingFileHandler
 
-from ebsco_dl.utils import ProcessLock, Log
-from ebsco_dl.version import __version__
 from ebsco_dl.ebsco_downloader import EbscoDownloader
-
-IS_DEBUG = False
-IS_VERBOSE = False
+from ebsco_dl.utils import Log, ProcessLock, check_debug, check_verbose
+from ebsco_dl.version import __version__
 
 
 class ReRaiseOnError(logging.StreamHandler):
@@ -28,9 +24,7 @@ class ReRaiseOnError(logging.StreamHandler):
             raise record.exception
 
 
-
 def setup_logger(storage_path: str, verbose=False):
-    global IS_VERBOSE
     log_formatter = logging.Formatter('%(asctime)s  %(levelname)s  {%(module)s}  %(message)s', '%Y-%m-%d %H:%M:%S')
     log_file = os.path.join(storage_path, 'EbscoDownloader.log')
     log_handler = RotatingFileHandler(
@@ -40,7 +34,6 @@ def setup_logger(storage_path: str, verbose=False):
     log_handler.setFormatter(log_formatter)
     if verbose:
         log_handler.setLevel(logging.DEBUG)
-        IS_VERBOSE = True
     else:
         log_handler.setLevel(logging.INFO)
 
@@ -57,7 +50,7 @@ def setup_logger(storage_path: str, verbose=False):
         logging.debug('ebsco-dl version: %s', __version__)
         logging.debug('python version: %s', ".".join(map(str, sys.version_info[:3])))
 
-    if IS_DEBUG:
+    if check_debug():
         logging.info('Debug-Mode detected. Errors will be re-risen.')
         app_log.addHandler(ReRaiseOnError())
 
@@ -69,25 +62,11 @@ def _dir_path(path):
         raise argparse.ArgumentTypeError(f'"{str(path)}" is not a valid path. Make sure the directory exists.')
 
 
-def _file_path(path):
-    if os.path.isfile(path):
-        return path
-    else:
-        raise argparse.ArgumentTypeError(f'"{str(path)}" is not a valid path. Make sure the file exists.')
-
-
 def _is_url(url):
     if url.startswith('http://') or url.startswith('https://'):
         return url
     else:
         raise argparse.ArgumentTypeError(f'"{str(url)}" is not a valid url. Make sure the url starts with https://')
-
-
-def check_debug():
-    global IS_DEBUG
-    if 'pydevd' in sys.modules:
-        IS_DEBUG = True
-        Log.debug('[RUNNING IN DEBUG-MODE!]')
 
 
 def _max_path_length_workaround(path):
@@ -106,6 +85,7 @@ def get_parser():
     """
     Creates a new argument parser.
     """
+
     parser = argparse.ArgumentParser(description=('Ebsco Downloader - A collection of tools to download ebooks'))
 
     parser.add_argument(
@@ -182,7 +162,7 @@ def main(args=None):
     skip_cert_verify = args.skip_cert_verify
 
     try:
-        if not IS_DEBUG:
+        if not check_debug():
             ProcessLock.lock(storage_path)
 
         EbscoDownloader(storage_path, args.url[0], skip_cert_verify).run()
@@ -197,7 +177,7 @@ def main(args=None):
         error_formatted = traceback.format_exc()
         logging.error(error_formatted, extra={'exception': e})
 
-        if IS_VERBOSE or IS_DEBUG:
+        if check_verbose() or check_debug():
             Log.cyan(f'{error_formatted}')
         else:
             Log.error(f'Exception: {e}')

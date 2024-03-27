@@ -1,28 +1,24 @@
 import collections
-import contextlib
 import email.utils
-import getpass
 import html
-import http
-import io
 import itertools
 import logging
 import math
 import os
 import re
-import shutil
 import ssl
 import sys
 import time
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
+from urllib.parse import quote
 
 import requests
 import urllib3
 from requests.utils import DEFAULT_CA_BUNDLE_PATH, extract_zipped_paths
-from urllib.parse import quote
+
 
 def check_verbose() -> bool:
     """Return if the verbose mode is active"""
@@ -315,7 +311,6 @@ class PathTools:
             sanitized_path.insert(0, drive_or_unc + os.path.sep)
         return os.path.join(*sanitized_path)
 
-    
     @staticmethod
     def path_of_book(storage_path: str, book_title: str):
         """
@@ -513,8 +508,8 @@ class SslHelper:
             ssl_context.options |= 0x4  # set ssl.OP_LEGACY_SERVER_CONNECT bit
         if use_simple_ciphers:
             pass
-            #ssl_context.options = 0
-            #ssl_context.set_ciphers("AES256-SHA")
+            # ssl_context.options = 0
+            # ssl_context.set_ciphers("AES256-SHA")
 
         return ssl_context
 
@@ -589,7 +584,7 @@ BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = range(30, 38)
 class Log:
     """
     Logs a given string to output with colors
-    :param logString: the string that should be logged
+    :param log_string: the string that should be logged
 
     The string functions returns the strings that would be logged.
 
@@ -598,80 +593,81 @@ class Log:
     """
 
     @staticmethod
-    def info_str(logString: str):
-        return COLOR_SEQ % WHITE + logString + RESET_SEQ
+    def info_str(log_string: str):
+        return COLOR_SEQ % WHITE + log_string + RESET_SEQ
 
     @staticmethod
-    def success_str(logString: str):
-        return COLOR_SEQ % GREEN + logString + RESET_SEQ
+    def success_str(log_string: str):
+        return COLOR_SEQ % GREEN + log_string + RESET_SEQ
 
     @staticmethod
-    def green_str(logString: str):
-        return COLOR_SEQ % GREEN + logString + RESET_SEQ
+    def green_str(log_string: str):
+        return COLOR_SEQ % GREEN + log_string + RESET_SEQ
 
     @staticmethod
-    def warning_str(logString: str):
-        return COLOR_SEQ % YELLOW + logString + RESET_SEQ
+    def warning_str(log_string: str):
+        return COLOR_SEQ % YELLOW + log_string + RESET_SEQ
 
     @staticmethod
-    def yellow_str(logString: str):
-        return COLOR_SEQ % YELLOW + logString + RESET_SEQ
+    def yellow_str(log_string: str):
+        return COLOR_SEQ % YELLOW + log_string + RESET_SEQ
 
     @staticmethod
-    def error_str(logString: str):
-        return COLOR_SEQ % RED + logString + RESET_SEQ
+    def error_str(log_string: str):
+        return COLOR_SEQ % RED + log_string + RESET_SEQ
 
     @staticmethod
-    def debug_str(logString: str):
-        return COLOR_SEQ % CYAN + logString + RESET_SEQ
+    def debug_str(log_string: str):
+        return COLOR_SEQ % CYAN + log_string + RESET_SEQ
 
     @staticmethod
-    def cyan_str(logString: str):
-        return COLOR_SEQ % CYAN + logString + RESET_SEQ
+    def cyan_str(log_string: str):
+        return COLOR_SEQ % CYAN + log_string + RESET_SEQ
 
     @staticmethod
-    def blue_str(logString: str):
-        return COLOR_SEQ % BLUE + logString + RESET_SEQ
+    def blue_str(log_string: str):
+        return COLOR_SEQ % BLUE + log_string + RESET_SEQ
 
     @staticmethod
-    def magenta_str(logString: str):
-        return COLOR_SEQ % MAGENTA + logString + RESET_SEQ
+    def magenta_str(log_string: str):
+        return COLOR_SEQ % MAGENTA + log_string + RESET_SEQ
 
     @staticmethod
-    def info(logString: str):
-        print(Log.info_str(logString))
+    def info(log_string: str):
+        print(Log.info_str(log_string))
 
     @staticmethod
-    def success(logString: str):
-        print(Log.success_str(logString))
+    def success(log_string: str):
+        print(Log.success_str(log_string))
 
     @staticmethod
-    def warning(logString: str):
-        print(Log.warning_str(logString))
+    def warning(log_string: str):
+        print(Log.warning_str(log_string))
 
     @staticmethod
-    def yellow(logString: str):
-        print(Log.yellow_str(logString))
+    def yellow(log_string: str):
+        print(Log.yellow_str(log_string))
 
     @staticmethod
-    def error(logString: str):
-        print(Log.error_str(logString))
+    def error(log_string: str):
+        print(Log.error_str(log_string))
 
     @staticmethod
-    def debug(logString: str):
-        print(Log.debug_str(logString))
+    def debug(log_string: str):
+        print(Log.debug_str(log_string))
 
     @staticmethod
-    def blue(logString: str):
-        print(Log.blue_str(logString))
+    def blue(log_string: str):
+        print(Log.blue_str(log_string))
 
     @staticmethod
-    def magenta(logString: str):
-        print(Log.magenta_str(logString))
+    def magenta(log_string: str):
+        print(Log.magenta_str(log_string))
 
     @staticmethod
-    def cyan(logString: str):
-        print(Log.cyan_str(logString))
+    def cyan(log_string: str):
+        print(Log.cyan_str(log_string))
+
 
 def recursive_urlencode(data):
     """URL-encode a multidimensional dictionary.

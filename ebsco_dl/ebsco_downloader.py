@@ -1,28 +1,24 @@
+import base64
+import json
+import logging
 import os
 import re
-import json
-import html
-import base64
-import logging
 import zipfile
-
 from dataclasses import dataclass, field
 from http.cookiejar import MozillaCookieJar
+from urllib.parse import ParseResult, parse_qs, urlparse
+
+import certifi  # pylint: disable=unused-import
+import pypdf
+import urllib3
 from Cryptodome.Cipher import AES
-from urllib.parse import urlparse, unquote, parse_qs, ParseResult
 from requests.sessions import Session
 
-import certifi
-import urllib3
-import requests
-import pypdf
-
-
-from ebsco_dl.utils import Log, SslHelper, PathTools, recursive_urlencode
+from ebsco_dl.utils import Log, PathTools, SslHelper, recursive_urlencode
 
 
 @dataclass
-class EBSCO_URL:
+class EbscoUrl:
     parsed_url: ParseResult
     book_id: str
     session_id: str
@@ -30,6 +26,7 @@ class EBSCO_URL:
     vid: str
     rid: str
     base_webview: str = field(init=False, default=None)
+
 
 class EbscoDownloader:
     stdHeader = {
@@ -53,40 +50,43 @@ class EbscoDownloader:
         logging.getLogger("urllib3").setLevel(logging.WARNING)
         urllib3.disable_warnings()
 
-
     @staticmethod
     def from_query(parsed_querry, parameter_name, default=None):
         result = parsed_querry.get(parameter_name, default)
         if result is None:
-            raise ValueError(f'Parameter {parameter_name} is not in query string. Please check that you use a valid URL.')
+            raise ValueError(
+                f'Parameter {parameter_name} is not in query string. Please check that you use a valid URL.'
+            )
 
         if isinstance(result, list):
             if len(result) != 1:
-                raise ValueError(f'Parameter {parameter_name} in query string contains unexpected content. Please check that you use a valid URL.')
+                raise ValueError(
+                    f'Parameter {parameter_name} in query string contains unexpected content.'
+                    + ' Please check that you use a valid URL.'
+                )
             return result[0]
         return result
 
-
     def run(self):
-        Log.info("In case of a problem please contact the project maintainer at: `https://github.com/C0D3D3V/Ebsco-Downloader/issues`")
-    
         # Parse download URL
         parsed_url = urlparse(self.download_url)
-        
+
         # Check if it is a valid URL
         if not parsed_url.path.startswith("/ehost/ebookviewer/ebook"):
             raise NotImplementedError('This type of URL is yet not supported')
 
-        parsed_querry = parse_qs(parsed_url.query)
+        parsed_query = parse_qs(parsed_url.query)
 
         book_id = parsed_url.path.split('/')[-1] if parsed_url.path.split('/')[-1] != 'ebook' else None
 
-        ebsco_url = EBSCO_URL(parsed_url=parsed_url,
-                  book_id = book_id,
-                  session_id = self.from_query(parsed_querry, 'sid'),
-                  book_format = self.from_query(parsed_querry, 'format'),
-                  vid = self.from_query(parsed_querry, 'vid', '0'),
-                  rid = self.from_query(parsed_querry, 'rid', '1'))
+        ebsco_url = EbscoUrl(
+            parsed_url=parsed_url,
+            book_id=book_id,
+            session_id=self.from_query(parsed_query, 'sid'),
+            book_format=self.from_query(parsed_query, 'format'),
+            vid=self.from_query(parsed_query, 'vid', '0'),
+            rid=self.from_query(parsed_query, 'rid', '1'),
+        )
 
         # In any case open book URL, to get cookies.
         session = self.create_session()
@@ -101,7 +101,7 @@ class EbscoDownloader:
             self.download_pdf(ebsco_url, session)
         else:
             raise NotImplementedError("This book format is not yet supported")
-    
+
     def create_session(self) -> Session:
         session = SslHelper.custom_requests_session(self.skip_cert_verify, True, True)
 
@@ -109,10 +109,10 @@ class EbscoDownloader:
         session.cookies = MozillaCookieJar(cookies_path)
         if os.path.isfile(cookies_path):
             session.cookies.load(ignore_discard=True, ignore_expires=True)
-        
+
         return session
 
-    def get_base_view(self, ebsco_url:EBSCO_URL, session: Session):
+    def get_base_view(self, ebsco_url: EbscoUrl, session: Session):
         base_data = recursive_urlencode(
             {
                 'sid': ebsco_url.session_id,
@@ -121,7 +121,9 @@ class EbscoDownloader:
                 'rid': ebsco_url.rid,
             }
         )
-        base_url = f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}{ebsco_url.parsed_url.path}?{base_data}'
+        base_url = (
+            f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}{ebsco_url.parsed_url.path}?{base_data}'
+        )
 
         Log.info(f'Loading base: `{base_url}`')
         response = session.get(
@@ -136,7 +138,7 @@ class EbscoDownloader:
             raise RuntimeError(f'Your session is broken! {response.reason}')
 
         if not urlparse(response.url).path.startswith('/ehost/ebookviewer/ebook'):
-            raise RuntimeError(f'Your cookies or the session id in the URL are invalid!')
+            raise RuntimeError('Your cookies or the session id in the URL are invalid!')
 
         return response.text
 
@@ -166,8 +168,8 @@ class EbscoDownloader:
         book_id = base64.urlsafe_b64encode(f'{db}__{term}__{tag}'.encode('utf-8')).decode('utf-8')
         return self.replace_equals_with_count(book_id)
 
-    def download_pdf(self, ebsco_url:EBSCO_URL, session: Session):
-        # Ground truth is version 18.842.0.1477 of EBSCO, I did not implement this on older versions 
+    def download_pdf(self, ebsco_url: EbscoUrl, session: Session):
+        # Ground truth is version 18.842.0.1477 of EBSCO, I did not implement this on older versions
 
         # First we retrieve the book info json
         book_info_data = recursive_urlencode(
@@ -177,8 +179,10 @@ class EbscoDownloader:
                 'theFormat': ebsco_url.book_format,
             }
         )
-        book_info_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
-                        + f'/ehost/ebookViewer/DigitalObject/{ebsco_url.book_id}?{book_info_data}')
+        book_info_url = (
+            f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+            + f'/ehost/ebookViewer/DigitalObject/{ebsco_url.book_id}?{book_info_data}'
+        )
 
         Log.info(f'Loading book info: `{book_info_url}`')
         response = session.get(
@@ -194,19 +198,18 @@ class EbscoDownloader:
         all_pages = book_info_json.get('pageData', [])
         all_pages_ids = []
         for page in all_pages:
-            page_artifactId = page.get('artifactId')
-            page_artifactId = page_artifactId.split('#')[0]
-            if page_artifactId not in all_pages_ids:
-                all_pages_ids.append(page_artifactId)
+            page_artifact_id = page.get('artifactId')
+            page_artifact_id = page_artifact_id.split('#')[0]
+            if page_artifact_id not in all_pages_ids:
+                all_pages_ids.append(page_artifact_id)
 
         # Extract Meta data
         book_title = book_info_json.get('title', 'untitled')
-        authors = book_info_json.get('authors', 'anonymous')
-        if isinstance(authors, str):
-            authors = authors.split(', ')
-        publicationYear = book_info_json.get('publicationYear', '1970')
-        language = self.first_match(r'"Language"\s*:\s*"([^"]+)"', 
-                                    ebsco_url.base_webview, 'Language of book', 'eng')
+        # authors = book_info_json.get('authors', 'anonymous')
+        # if isinstance(authors, str):
+        #     authors = authors.split(', ')
+        # publicationYear = book_info_json.get('publicationYear', '1970')
+        # language = self.first_match(r'"Language"\s*:\s*"([^"]+)"', ebsco_url.base_webview, 'Language of book', 'eng')
 
         # Start downloading Artifacts
         book_directory = PathTools.path_of_book(self.storage_path, book_title)
@@ -220,9 +223,11 @@ class EbscoDownloader:
             if os.path.isfile(artifact_file_path):
                 continue
 
-            artifact_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
-                        + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
-                        + f'/{ebsco_url.session_id}/0/{page_id}')
+            artifact_url = (
+                f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+                + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
+                + f'/{ebsco_url.session_id}/0/{page_id}'
+            )
 
             Log.info(f'Loading artifact url: `{artifact_url}`')
             response = session.get(
@@ -236,7 +241,7 @@ class EbscoDownloader:
             if not response.ok or response.url != artifact_url:
                 raise RuntimeError(f'We cot rate limited! {response.reason}')
 
-            Log.info(f'Loaded artifact')
+            Log.info('Loaded artifact')
 
             # Save Artifact to disk
             with open(artifact_file_path, 'wb') as fs:
@@ -252,19 +257,18 @@ class EbscoDownloader:
         for entry in all_contents:
             self.build_outline(merger, all_contents.get(entry, {}))
 
-        
-        Log.info(f'Writing PDF to disk (this can take long for big PDFs)')
+        Log.info('Writing PDF to disk (this can take long for big PDFs)')
         merger.write(str(book_directory) + '.pdf')
-        
+
     @staticmethod
     def build_outline(merger, nav_dic, parent=None) -> str:
-        new_parent = merger.add_outline_item(title=nav_dic.get('title'), page_number=nav_dic.get('pages')[0], parent=parent)
-        childContents = nav_dic.get('childContents', {}) 
-        for entry in childContents:
-            EbscoDownloader.build_outline(merger, childContents.get(entry, {}), new_parent) 
-        
+        new_parent = merger.add_outline_item(
+            title=nav_dic.get('title'), page_number=nav_dic.get('pages')[0], parent=parent
+        )
+        child_contents = nav_dic.get('childContents', {})
+        for entry in child_contents:
+            EbscoDownloader.build_outline(merger, child_contents.get(entry, {}), new_parent)
 
-    
     @staticmethod
     def decrypt(data_base64, key_base64, iv_base_64):
         data = base64.b64decode(data_base64.encode('utf-8'))
@@ -272,8 +276,11 @@ class EbscoDownloader:
         iv = base64.b64decode(iv_base_64.encode('utf-8'))
         cipher = AES.new(key, AES.MODE_CBC, iv=iv)
         decrypted_data = cipher.decrypt(data)
-
-        return decrypted_data.decode('utf-8')
+        padding_bytes = decrypted_data[-1]
+        if padding_bytes >= 1 and padding_bytes <= 16:
+            return decrypted_data[:-padding_bytes].decode('utf-8')
+        else:
+            return decrypted_data.decode('utf-8')
 
     @staticmethod
     def old_decrypt(input_base64, key_base64):
@@ -295,8 +302,8 @@ class EbscoDownloader:
 
         return decrypted_data.decode('utf-8')
 
-    def download_epub(self, ebsco_url:EBSCO_URL, session: Session):
-        # Ground truth is version 18.842.0.1477 of EBSCO, for older EBSCO version use older versions of ebsco-dl 
+    def download_epub(self, ebsco_url: EbscoUrl, session: Session):
+        # Ground truth is version 18.842.0.1477 of EBSCO, for older EBSCO version use older versions of ebsco-dl
         # https://github.com/C0D3D3V/Ebsco-Downloader/tree/5ce8f159975b9e544bc8d425f96b16591a2b057e
 
         # First we retrieve the book info json
@@ -307,8 +314,10 @@ class EbscoDownloader:
                 'theFormat': ebsco_url.book_format,
             }
         )
-        book_info_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
-                        + f'/ehost/ebookViewer/DigitalObject/{ebsco_url.book_id}?{book_info_data}')
+        book_info_url = (
+            f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+            + f'/ehost/ebookViewer/DigitalObject/{ebsco_url.book_id}?{book_info_data}'
+        )
 
         Log.info(f'Loading book info: `{book_info_url}`')
         response = session.get(
@@ -328,25 +337,23 @@ class EbscoDownloader:
         authors = book_info_json.get('authors', 'anonymous')
         if isinstance(authors, str):
             authors = authors.split(', ')
-        publicationYear = book_info_json.get('publicationYear', '1970')
-        language = self.first_match(r'"Language"\s*:\s*"([^"]+)"', 
-                                    ebsco_url.base_webview, 'Language of book', 'en')
+        publication_year = book_info_json.get('publicationYear', '1970')
+        language = self.first_match(r'"Language"\s*:\s*"([^"]+)"', ebsco_url.base_webview, 'Language of book', 'en')
 
         # Collect encryption keys
-        book_bsk = self.first_match(r'"Bsk"\s*:\s*"([^"]+)"',
-                                    ebsco_url.base_webview,
-                                    'Book Session Key') # Book Session Key
-        book_ek = book_info_json.get('ek') # Encrypted Encryption Key
-        book_sei = book_info_json.get('sei') # IV for Encrypted Encryption Key
+        book_bsk = self.first_match(
+            r'"Bsk"\s*:\s*"([^"]+)"', ebsco_url.base_webview, 'Book Session Key'
+        )  # Book Session Key
+        book_ek = book_info_json.get('ek')  # Encrypted Encryption Key
+        book_sei = book_info_json.get('sei')  # IV for Encrypted Encryption Key
         # For the book content itself the IV is the last 24 Bytes
 
         book_key = self.decrypt(book_ek, book_bsk, book_sei)
-        
 
         # Start downloading Artifacts
         book_directory = PathTools.path_of_book(self.storage_path, book_title)
-        book_path_OEBPS = book_directory / 'OEBPS'
-        os.makedirs(str(book_path_OEBPS), exist_ok=True)
+        book_path_oebps = book_directory / 'OEBPS'
+        os.makedirs(str(book_path_oebps), exist_ok=True)
 
         all_includes = []
         epub_content_files = []
@@ -354,14 +361,15 @@ class EbscoDownloader:
 
         for page_id in all_pages_ids:
             page_filename = '/'.join(page_id.split('/')[4:])
-            artifact_file_path = book_path_OEBPS / page_filename
+            artifact_file_path = book_path_oebps / page_filename
             os.makedirs(str(artifact_file_path.parent), exist_ok=True)
             epub_content_files.append(artifact_file_path)
 
-
-            artifact_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
-                        + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
-                        + f'/{ebsco_url.session_id}/0/{page_id}')
+            artifact_url = (
+                f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+                + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
+                + f'/{ebsco_url.session_id}/0/{page_id}'
+            )
 
             Log.info(f'Loading artifact url: `{artifact_url}`')
             response = session.get(
@@ -375,18 +383,18 @@ class EbscoDownloader:
             if not response.ok or response.url != artifact_url:
                 raise RuntimeError(f'We cot rate limited! {response.reason}')
 
-            Log.info(f'Loaded artifact')
+            Log.info('Loaded artifact')
 
             # Compose xhtml
-            xhtml_head = self.first_match(r'([\s\S]*?)<script id=\'content-body\'',
-                                        response.text,
-                                        f'{page_id} artifact xhtml head')
-            encrypted_content = self.first_match(r'<script id=\'content-body\'[^>]+>([^<]+)</script>',
-                                        response.text,
-                                        f'{page_id} artifact content')
+            xhtml_head = self.first_match(
+                r'([\s\S]*?)<script id=\'content-body\'', response.text, f'{page_id} artifact xhtml head'
+            )
+            encrypted_content = self.first_match(
+                r'<script id=\'content-body\'[^>]+>([^<]+)</script>', response.text, f'{page_id} artifact content'
+            )
             xhtml_footer = '\r\n</body> </html>'
-            
-            Log.info(f'Decrypting artifact')
+
+            Log.info('Decrypting artifact')
             decrypted = self.decrypt(encrypted_content[:-24], book_key, encrypted_content[-24:])
 
             # Find Header includes
@@ -410,14 +418,16 @@ class EbscoDownloader:
         base_artifact = all_pages_ids[0]
         base_artifact_path = '/'.join(base_artifact.split('/')[:4]) + '/'
 
-        base_artifact_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
-                    + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
-                    + f'/{ebsco_url.session_id}/0/{base_artifact_path}')
+        base_artifact_url = (
+            f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+            + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
+            + f'/{ebsco_url.session_id}/0/{base_artifact_path}'
+        )
 
         for include in all_includes:
             artifact_url = base_artifact_url + include
 
-            artifact_file_path = book_path_OEBPS / include
+            artifact_file_path = book_path_oebps / include
             os.makedirs(str(artifact_file_path.parent), exist_ok=True)
 
             epub_include_files.append(artifact_file_path)
@@ -430,7 +440,7 @@ class EbscoDownloader:
                 allow_redirects=True,
                 timeout=60,
             )
-            Log.info(f'Loaded artifact')
+            Log.info('Loaded artifact')
 
             if include.endswith('css'):
                 artifact_includes = re.findall(r'url\s*\("?([^")]+)"?\)', response.text)
@@ -462,7 +472,7 @@ class EbscoDownloader:
 </container>
 ''',
         )
-        
+
         # OEBPS/content.opf
         creators = ''
         for idx, author in enumerate(authors):
@@ -473,11 +483,11 @@ class EbscoDownloader:
 
         # build spine and add all normal xhtml files to manifest
         for idx, epub_content_file in enumerate(epub_content_files):
-            relativ_path = str(epub_content_file.relative_to(book_path_OEBPS))
+            relative_path = str(epub_content_file.relative_to(book_path_oebps))
 
-            epub_manifest += f'<item id="html{idx + 1}" href="{relativ_path}" media-type="application/xhtml+xml"/>\n'
+            epub_manifest += f'<item id="html{idx + 1}" href="{relative_path}" media-type="application/xhtml+xml"/>\n'
             epub_spine += f'<itemref idref="html{idx + 1}" />\n'
-            epub.write(str(epub_content_file), 'OEBPS/' + relativ_path)
+            epub.write(str(epub_content_file), 'OEBPS/' + relative_path)
 
         # Add all includes to manifest
         mimetype_dict = {
@@ -499,7 +509,7 @@ class EbscoDownloader:
         fonts_counter = 0
         html_counter = len(epub_content_files)
         for epub_include_file in epub_include_files:
-            relativ_path = str(epub_include_file.relative_to(book_path_OEBPS))
+            relative_path = str(epub_include_file.relative_to(book_path_oebps))
 
             file_ext = str(epub_include_file).rsplit('.', maxsplit=1)[-1]
             if file_ext not in mimetype_dict:
@@ -526,19 +536,19 @@ class EbscoDownloader:
                 fonts_counter += 1
                 idx = fonts_counter
 
-            epub_manifest += f'<item id="{file_type}{idx}" href="{relativ_path}" media-type="{media_type}"/>'
+            epub_manifest += f'<item id="{file_type}{idx}" href="{relative_path}" media-type="{media_type}"/>'
 
             # Maybe add html files to index? I'm not sure if included html needs to be added
             # epub_spine += f'<itemref idref="html{file_type}{idx}" />'
-            epub.write(str(epub_include_file), 'OEBPS/' + relativ_path)
-        
-        epub_manifest += f'<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>'
+            epub.write(str(epub_include_file), 'OEBPS/' + relative_path)
+
+        epub_manifest += '<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>'
 
         content_tpl = f'''<?xml version="1.0"?>
 <package version="2.0" xmlns="http://www.idpf.org/2007/opf">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
     <dc:title>{book_title}</dc:title>
-    <dc:date>{publicationYear}</dc:date>
+    <dc:date>{publication_year}</dc:date>
     <dc:language>{language}</dc:language>
     {creators}
     <metadata/>
@@ -557,8 +567,6 @@ class EbscoDownloader:
 
         all_contents = book_info_json.get('contents', {})
         nav_points = '\n'.join(self.build_nav_points(all_contents.get(entry, {})) for entry in all_contents)
-
-        
 
         toc_tpl = f'''<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="en-US">
     <head>
@@ -588,4 +596,7 @@ class EbscoDownloader:
             </navLabel>
             <content src="{'/'.join(nav_dic.get('artifactId').split('/')[4:])}"/>
         </navPoint>
-        ''' + '\n'.join(EbscoDownloader.build_nav_points(nav_dic.get('childContents', {}).get(entry, {})) for entry in nav_dic.get('childContents', {}))
+        ''' + '\n'.join(
+            EbscoDownloader.build_nav_points(nav_dic.get('childContents', {}).get(entry, {}))
+            for entry in nav_dic.get('childContents', {})
+        )

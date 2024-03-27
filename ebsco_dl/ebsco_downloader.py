@@ -343,9 +343,10 @@ class EbscoDownloader:
         epub_include_files = []
 
         for page_id in all_pages_ids:
-            page_filename = page_id.rsplit('/', 1)[1]
-            artifact_file_path = str(book_path_OEBPS / page_filename)
-            epub_content_files.append(book_path_OEBPS / page_filename)
+            page_filename = '/'.join(page_id.split('/')[4:])
+            artifact_file_path = book_path_OEBPS / page_filename
+            os.makedirs(str(artifact_file_path.parent), exist_ok=True)
+            epub_content_files.append(artifact_file_path)
 
 
             artifact_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
@@ -385,18 +386,19 @@ class EbscoDownloader:
             artifact_includes += re.findall(r'src\s*=\s*"([^"]+)"', decrypted)
 
             for artifact_include in artifact_includes:
+                artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
                 if artifact_include not in all_includes:
                     all_includes.append(artifact_include)
 
             # Save Artifact to disk
-            with open(artifact_file_path, 'w', encoding='utf-8') as fs:
+            with open(str(artifact_file_path), 'w', encoding='utf-8') as fs:
                 fs.write(xhtml_head)
                 fs.write(decrypted)
                 fs.write(xhtml_footer)
 
         # Download includes (Images, Stylesheets, Fonts)
         base_artifact = all_pages_ids[0]
-        base_artifact_path = base_artifact[: -len(base_artifact.split('/')[-1])]
+        base_artifact_path = '/'.join(base_artifact.split('/')[:4]) + '/'
 
         base_artifact_url = (f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
                     + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
@@ -406,13 +408,7 @@ class EbscoDownloader:
             artifact_url = base_artifact_url + include
 
             artifact_file_path = book_path_OEBPS / include
-
-            include_split = include.split('/')
-            if len(include_split) > 1:
-                subfolder = include_split[-2]
-                artifact_filename = include_split[-1]
-                artifact_file_path = book_path_OEBPS / subfolder / artifact_filename
-                os.makedirs(str(book_path_OEBPS / subfolder), exist_ok=True)
+            os.makedirs(str(artifact_file_path.parent), exist_ok=True)
 
             epub_include_files.append(artifact_file_path)
 
@@ -426,11 +422,10 @@ class EbscoDownloader:
             )
             Log.info(f'Loaded artifact')
 
-            if artifact_filename.endswith('css'):
+            if include.endswith('css'):
                 artifact_includes = re.findall(r'url\s*\("?([^")]+)"?\)', response.text)
                 for artifact_include in artifact_includes:
-                    if artifact_include.startswith('../'):
-                        artifact_include = artifact_include[3:]
+                    artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
                     if artifact_include not in all_includes:
                         all_includes.append(artifact_include)
 
@@ -580,6 +575,6 @@ class EbscoDownloader:
             <navLabel>
                 <text>{nav_dic.get('title')}</text>
             </navLabel>
-            <content src="{nav_dic.get('artifactId').rsplit('/',1)[1]}"/>
+            <content src="{'/'.join(nav_dic.get('artifactId').split('/')[4:])}"/>
         </navPoint>
         ''' + '\n'.join(EbscoDownloader.build_nav_points(nav_dic.get('childContents', {}).get(entry, {})) for entry in nav_dic.get('childContents', {}))

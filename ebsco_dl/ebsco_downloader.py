@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -6,15 +7,29 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 from http.cookiejar import MozillaCookieJar
+from pathlib import Path
+from typing import List
 from urllib.parse import ParseResult, parse_qs, urlparse
 
+import aiofiles
+import aiohttp
 import certifi  # pylint: disable=unused-import
 import pypdf
 import urllib3
+from aiohttp.client_exceptions import ClientError, ClientResponseError
 from Cryptodome.Cipher import AES
 from requests.sessions import Session
 
-from ebsco_dl.utils import Log, PathTools, SslHelper, recursive_urlencode
+from ebsco_dl.utils import Log
+from ebsco_dl.utils import PathTools as PT
+from ebsco_dl.utils import (
+    SimpleCookieJar,
+    SslHelper,
+    check_verbose,
+    convert_to_aiohttp_cookie_jar,
+    format_bytes,
+    recursive_urlencode,
+)
 
 
 @dataclass
@@ -26,6 +41,10 @@ class EbscoUrl:
     vid: str
     rid: str
     base_webview: str = field(init=False, default=None)
+
+
+class ContentRangeError(ConnectionError):
+    pass
 
 
 class EbscoDownloader:
@@ -45,6 +64,9 @@ class EbscoDownloader:
         self.storage_path = storage_path
         self.download_url = download_url
         self.skip_cert_verify = skip_cert_verify
+        self.max_dl_retries = 10
+        self.max_parallel_dl = 5
+        self.verbose = check_verbose()
 
         logging.getLogger("requests").setLevel(logging.WARNING)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -101,6 +123,13 @@ class EbscoDownloader:
             self.download_pdf(ebsco_url, session)
         else:
             raise NotImplementedError("This book format is not yet supported")
+
+    def get_cookie_jar(self) -> aiohttp.CookieJar:
+        cookies_path = 'cookies.txt'
+        cookie_jar = SimpleCookieJar(cookies_path)
+        if os.path.isfile(cookies_path):
+            cookie_jar.load(ignore_discard=True, ignore_expires=True)
+        return convert_to_aiohttp_cookie_jar(cookie_jar)
 
     def create_session(self) -> Session:
         session = SslHelper.custom_requests_session(self.skip_cert_verify, True, True)
@@ -212,40 +241,9 @@ class EbscoDownloader:
         # language = self.first_match(r'"Language"\s*:\s*"([^"]+)"', ebsco_url.base_webview, 'Language of book', 'eng')
 
         # Start downloading Artifacts
-        book_directory = PathTools.path_of_book(self.storage_path, book_title)
-        os.makedirs(str(book_directory), exist_ok=True)
-
-        pdf_content_files = []
-        for page_id in all_pages_ids:
-            page_filename = page_id.rsplit('/', 1)[1]
-            artifact_file_path = str(book_directory / page_filename)
-            pdf_content_files.append(book_directory / page_filename)
-            if os.path.isfile(artifact_file_path):
-                continue
-
-            artifact_url = (
-                f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
-                + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
-                + f'/{ebsco_url.session_id}/0/{page_id}'
-            )
-
-            Log.info(f'Loading artifact url: `{artifact_url}`')
-            response = session.get(
-                artifact_url,
-                headers=self.stdHeader,
-                verify=(not self.skip_cert_verify),
-                allow_redirects=True,
-                timeout=60,
-            )
-
-            if not response.ok or response.url != artifact_url:
-                raise RuntimeError(f'We cot rate limited! {response.reason}')
-
-            Log.info('Loaded artifact')
-
-            # Save Artifact to disk
-            with open(artifact_file_path, 'wb') as fs:
-                fs.write(response.content)
+        book_path = PT.path_of_book(self.storage_path, book_title)
+        os.makedirs(str(book_path), exist_ok=True)
+        pdf_content_files = asyncio.run(self.batch_download_pdf_parts(all_pages_ids, book_path, ebsco_url))
 
         Log.info('Merging pdf artifacts to one pdf')
         merger = pypdf.PdfMerger()
@@ -258,7 +256,157 @@ class EbscoDownloader:
             self.build_outline(merger, all_contents.get(entry, {}))
 
         Log.info('Writing PDF to disk (this can take long for big PDFs)')
-        merger.write(str(book_directory) + '.pdf')
+        merger.write(str(book_path) + '.pdf')
+
+    async def get_can_continue_on_fail(self, url, session):
+        try:
+            headers = self.stdHeader.copy()
+            headers['Range'] = 'bytes=0-4'
+            resp = await session.request("GET", url, headers=headers)
+            return resp.headers.get('Content-Range') is not None and resp.status == 206
+        except Exception as err:
+            if self.verbose:
+                Log.debug(f"Failed to check if download can be continued on fail: {err}")
+        return False
+
+    async def batch_download_pdf_parts(
+        self, dl_jobs: List[str], book_path: Path, ebsco_url: EbscoUrl, is_essential: bool = True
+    ) -> List[bool]:
+        """
+        @param dl_jobs: List of rel_file_path
+        @param is_essential: Applied to all jobs
+        """
+        semaphore = asyncio.Semaphore(self.max_parallel_dl)
+        dl_results = await asyncio.gather(
+            *[self.download_pdf_part_from_ebsco(dl_job, book_path, ebsco_url, semaphore) for dl_job in dl_jobs]
+        )
+        if is_essential:
+            for idx, dl_result in enumerate(dl_results):
+                if not dl_result[0]:
+                    Log.error(f'Error: {dl_jobs[idx]} is essential. Abort! Please try again later!')
+                    exit(1)
+        return [tup[1] for tup in dl_results]
+
+    async def download_pdf_part_from_ebsco(
+        self,
+        page_id: str,
+        book_path: Path,
+        ebsco_url: EbscoUrl,
+        semaphore: asyncio.Semaphore,
+        conn_timeout: int = 10,
+        read_timeout: int = 1800,
+    ) -> (bool, Path):
+        """Returns True if the file was successfully downloaded or exists"""
+
+        rel_file_path = page_id.rsplit('/', 1)[1]
+        local_path_raw = book_path / rel_file_path
+        local_path = str(local_path_raw)
+
+        if os.path.exists(local_path):
+            # Warning: We do not check if the file is complete
+            Log.info(f'{rel_file_path} is already present')
+            return True, local_path_raw
+        else:
+            PT.make_base_dir(local_path)
+            dl_url = (
+                f'{ebsco_url.parsed_url.scheme}://{ebsco_url.parsed_url.hostname}'
+                + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
+                + f'/{ebsco_url.session_id}/0/{page_id}'
+            )
+            if self.verbose:
+                Log.info(f'Downloading {rel_file_path} from: {dl_url}')
+            else:
+                Log.info(f'Downloading {rel_file_path}...')
+
+            received = 0
+            total = 0
+            tries_num = 0
+            file_obj = None
+            can_continue_on_fail = False
+            headers = self.stdHeader.copy()
+            finished_successfully = False
+            async with semaphore, aiohttp.ClientSession(
+                cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
+            ) as session:
+                while tries_num < self.max_dl_retries:
+                    try:
+                        if tries_num > 0 and can_continue_on_fail:
+                            headers["Range"] = f"bytes={received}-"
+                        elif not can_continue_on_fail and 'Range' in headers:
+                            del headers['Range']
+                        ssl_param = False if self.skip_cert_verify else None
+                        async with session.request(
+                            "GET", dl_url, headers=headers, raise_for_status=True, ssl=ssl_param
+                        ) as resp:
+                            # Download the file.
+                            total = int(resp.headers.get("Content-Length", 0))
+                            content_range = resp.headers.get("Content-Range", "")  # Example: bytes 200-1000/67589
+
+                            if resp.status not in [200, 206]:
+                                if self.verbose:
+                                    Log.debug(f"Warning {rel_file_path} got status {resp.status}")
+
+                            if tries_num > 0 and can_continue_on_fail and not content_range and resp.status != 206:
+                                raise ContentRangeError(
+                                    f"Server did not response for {rel_file_path} with requested range data"
+                                )
+                            file_obj = file_obj or await aiofiles.open(local_path, "wb")
+                            chunk = await resp.content.read(1024 * 10)
+                            chunk_idx = 0
+                            while chunk:
+                                received += len(chunk)
+                                if chunk_idx % 100 == 0:
+                                    Log.info(f"{rel_file_path} got {format_bytes(received)} / {format_bytes(total)}")
+                                await file_obj.write(chunk)
+                                chunk = await resp.content.read(1024 * 10)
+                                chunk_idx += 1
+
+                        if self.verbose:
+                            Log.success(f'Downloaded {rel_file_path} to: {local_path}')
+                        else:
+                            Log.success(f'Successfully downloaded {rel_file_path}')
+
+                        finished_successfully = True
+                        break
+
+                    except (ClientError, OSError, ValueError, ContentRangeError) as err:
+                        if tries_num == 0:
+                            can_continue_on_fail = await self.get_can_continue_on_fail(dl_url, session)
+                        if (not can_continue_on_fail and received > 0) or isinstance(err, ContentRangeError):
+                            can_continue_on_fail = False
+                            # Clean up failed file because we can not recover
+                            if file_obj is not None:
+                                await file_obj.close()
+                                file_obj = None
+                            if os.path.exists(local_path):
+                                os.unlink(local_path)
+                            received = 0
+
+                        if isinstance(err, ClientResponseError):
+                            if err.status in [408, 409, 429]:  # pylint: disable=no-member
+                                # 408 (timeout) or 409 (conflict) and 429 (too many requests)
+                                # Retry after 1 sec
+                                await asyncio.sleep(1)
+                            else:
+                                Log.info(f'{rel_file_path} could not be downloaded: {err.status} {err.message}')
+                                if self.verbose:
+                                    Log.info(f'Error: {str(err)}')
+                                break
+
+                        if self.verbose:
+                            Log.warning(
+                                f'(Try {tries_num} of {self.max_dl_retries})'
+                                + f' Unable to download "{rel_file_path}": {str(err)}'
+                            )
+                        tries_num += 1
+
+            if file_obj is not None:
+                await file_obj.close()
+            if not finished_successfully:
+                if os.path.exists(local_path):
+                    os.unlink(local_path)
+                return False, local_path_raw
+            return True, local_path_raw
 
     @staticmethod
     def build_outline(merger, nav_dic, parent=None) -> str:
@@ -351,7 +499,7 @@ class EbscoDownloader:
         book_key = self.decrypt(book_ek, book_bsk, book_sei)
 
         # Start downloading Artifacts
-        book_directory = PathTools.path_of_book(self.storage_path, book_title)
+        book_directory = PT.path_of_book(self.storage_path, book_title)
         book_path_oebps = book_directory / 'OEBPS'
         os.makedirs(str(book_path_oebps), exist_ok=True)
 

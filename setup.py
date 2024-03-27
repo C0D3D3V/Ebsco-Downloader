@@ -1,6 +1,6 @@
 from os import path
-from setuptools import setup, find_packages
 
+from setuptools import find_packages, setup
 
 # Get the version from ebsco_dl/version.py without importing the package
 exec(compile(open('ebsco_dl/version.py').read(), 'ebsco_dl/version.py', 'exec'))
@@ -34,7 +34,9 @@ setup(
         'certifi>=2022.6.15',
         'pycryptodome>=3.15.0',
         'requests>=2.28.1',
-        'pypdf>=4.1.0'
+        'pypdf>=4.1.0',
+        'aiohttp>=3.9.3',
+        'aiofiles>=23.2.1',
     ],
     classifiers=[
         'Development Status :: 5 - Production/Stable',

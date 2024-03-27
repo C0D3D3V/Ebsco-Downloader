@@ -19,9 +19,21 @@ I am not liable for any violation of the law that applies in your country nor fo
 `ebsco-dl` is not available on pypi currently, so you have to install it by cloning this repository to your disk and run `pip install .` inside the folder that contains the `setup.py`.
 4. Read the Usage section
 
+Alternatively you can install it in a python virtual environment:
+
+1. Install [Python](https://www.python.org/) >=3.7 and [git](https://git-scm.com/downloads)
+2. Install  `virtualenv`: `pip install virtualenv`
+3. Create a directory in that you want to install ebsco-dl; open a terminal inside of it
+4. Clone this repository inside of that folder: `git clone https://github.com/C0D3D3V/Ebsco-Downloader.git .`
+5. Run `virtualenv venv` to create the virtual environment (on Windows use `venv\Scripts\activate`)
+6. Run `source venv/bin/activate` to activate the virtual environment (on Windows use `venv\Scripts\activate`)
+7. Install `ebsco-dl`: `pip install .`
+
+
+
 ### Usage
 
-For an easy copy of the cookies, you can install an Add-On like `cookies.txt` [for Firefox](https://addons.mozilla.org/de/firefox/addon/cookies-txt/?utm_source=addons.mozilla.org&utm_medium=referral&utm_content=search) or [for Chrome](https://chrome.google.com/webstore/detail/get-cookiestxt/bgaddhkoddajcdgocldbbfleckgcbcid). Export the cookies of your login page (`ukzn.idm.oclc.org`) to a `cookies.txt` file. 
+For an easy copy of the cookies, you can install an Add-On like `cookies.txt` [for Firefox](https://addons.mozilla.org/de/firefox/addon/cookies-txt/?utm_source=addons.mozilla.org&utm_medium=referral&utm_content=search) or [for Chrome](https://chromewebstore.google.com/detail/get-cookiestxt-clean/ahmnmhfbokciafffnknlekllgcnafnie). Export the cookies of your login page (`ukzn.idm.oclc.org`) to a `cookies.txt` file. 
 
 Alternatively, you can create the `cookies.txt` file yourself, keep in mind it needs to be in Netscape format like this (`a3azaHajajaLada` is the cookie):
 
@@ -38,6 +50,8 @@ Alternatively, you can create the `cookies.txt` file yourself, keep in mind it n
 Copy the `cookies.txt` file to the directory where you want to download the books. Open a terminal inside of that directory.
 
 Open an ebook on your library in your browser, so you get a link that looks like this: `https://web-p-ebscohost-com.ukzn.idm.oclc.org/ehost/ebookviewer/ebook/bmxlYmtfXzI1MjQxMjhfX0FO0?sid=119ac7c8-1a4f-4b8a-8ea4-deae7f213fa4@redis&vid=0&format=EK&rid=1`
+
+or like this: `https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=bbd8ffd2-08e3-4be1-9377-7b7aad871d39%40redis&vid=0&format=EB`
 
 
 You can download this book now using this command: `ebsco-dl -dp https://web-p-ebscohost-com.ukzn.idm.oclc.org/ehost/ebookviewer/ebook/bmxlYmtfXzI1MjQxMjhfX0FO0?sid=119ac7c8-1a4f-4b8a-8ea4-deae7f213fa4@redis&vid=0&format=EK&rid=1`. The book will be downloaded in the current working directory, you can change this behavior by using the `--path` option.

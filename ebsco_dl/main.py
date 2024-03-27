@@ -9,11 +9,9 @@ import traceback
 
 from logging.handlers import RotatingFileHandler
 
-import ebsco_dl.utils.process_lock as process_lock
-
-from ebsco_dl.utils.logger import Log
+from ebsco_dl.utils import ProcessLock, Log
 from ebsco_dl.version import __version__
-from ebsco_dl.download_service.page_links_downloader import PageLinksDownloader
+from ebsco_dl.ebsco_downloader import EbscoDownloader
 
 IS_DEBUG = False
 IS_VERBOSE = False
@@ -32,7 +30,7 @@ class ReRaiseOnError(logging.StreamHandler):
 
 def run_download_pages(storage_path: str, download_url: str, skip_cert_verify: bool):
     Log.debug('Start downloading all Pages...')
-    crawler = PageLinksDownloader(storage_path, download_url, skip_cert_verify)
+    crawler = EbscoDownloader(storage_path, download_url, skip_cert_verify)
     result = crawler.run()
     if result is None:
         Log.success('Downloading all Pages finished')
@@ -195,23 +193,23 @@ def main(args=None):
 
     try:
         if not IS_DEBUG:
-            process_lock.lock(storage_path)
+            ProcessLock.lock(storage_path)
 
         if args.download_pages is not None and len(args.download_pages) == 1:
             run_download_pages(storage_path, args.download_pages[0], skip_cert_verify)
 
         Log.success('All done. Exiting..')
-        process_lock.unlock(storage_path)
+        ProcessLock.unlock(storage_path)
     except BaseException as e:
         print('\n')
-        if not isinstance(e, process_lock.LockError):
-            process_lock.unlock(storage_path)
+        if not isinstance(e, ProcessLock.LockError):
+            ProcessLock.unlock(storage_path)
 
         error_formatted = traceback.format_exc()
         logging.error(error_formatted, extra={'exception': e})
 
         if IS_VERBOSE or IS_DEBUG:
-            Log.critical(f'{error_formatted}')
+            Log.cyan(f'{error_formatted}')
         else:
             Log.error(f'Exception: {e}')
 

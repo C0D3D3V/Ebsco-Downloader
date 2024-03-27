@@ -8,3 +8,4 @@ __pycache__
 /ebsco_dl.egg-info
 EbscoDownloader.log
 analyse_js
+venv

@@ -248,9 +248,20 @@ class EbscoDownloader:
             merger.append(pdf_page)
             Log.info(f'Merged artifact {idx}')
 
+        all_contents = book_info_json.get('contents', {})
+        for entry in all_contents:
+            self.build_outline(merger, all_contents.get(entry, {}))
+
+        
         Log.info(f'Writing PDF to disk (this can take long for big PDFs)')
         merger.write(str(book_directory) + '.pdf')
         
+    @staticmethod
+    def build_outline(merger, nav_dic, parent=None) -> str:
+        new_parent = merger.add_outline_item(title=nav_dic.get('title'), page_number=nav_dic.get('pages')[0], parent=parent)
+        childContents = nav_dic.get('childContents', {}) 
+        for entry in childContents:
+            EbscoDownloader.build_outline(merger, childContents.get(entry, {}), new_parent) 
         
 
     
@@ -310,7 +321,6 @@ class EbscoDownloader:
 
         book_info_json = json.loads(response.text)
         all_pages = book_info_json.get('fileData', [])
-        all_content_entries = book_info_json.get('contents', {}).get('top', {})
 
         # Extract Meta data
         all_pages_ids = [page.get('artifactId') for page in all_pages]
@@ -545,7 +555,8 @@ class EbscoDownloader:
         # OEBPS/toc.ncx
         authors_display = " and ".join(authors) if len(authors) > 1 else authors[0]
 
-        nav_points = self.build_nav_points(all_content_entries)
+        all_contents = book_info_json.get('contents', {})
+        nav_points = '\n'.join(self.build_nav_points(all_contents.get(entry, {})) for entry in all_contents)
 
         
 

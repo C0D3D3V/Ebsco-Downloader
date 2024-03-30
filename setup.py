@@ -32,8 +32,9 @@ setup(
     python_requires='>=3.6',
     install_requires=[
         'certifi>=2022.6.15',
-        'pycryptodome>=3.15.0',
+        'pycryptodomex>=3.20.0',
         'requests>=2.28.1',
+        'colorama>=0.4.6',
         'pypdf>=4.1.0',
         'aiohttp>=3.9.3',
         'aiofiles>=23.2.1',

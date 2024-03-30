@@ -8,6 +8,8 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 
+from colorama import just_fix_windows_console
+
 from ebsco_dl.ebsco_downloader import EbscoDownloader
 from ebsco_dl.utils import Log, ProcessLock, check_debug, check_verbose
 from ebsco_dl.version import __version__
@@ -150,6 +152,7 @@ def get_parser():
 def main(args=None):
     """The main routine."""
 
+    just_fix_windows_console()
     check_debug()
 
     parser = get_parser()

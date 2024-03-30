@@ -21,6 +21,7 @@ from urllib.parse import quote
 import requests
 import urllib3
 from aiohttp.cookiejar import CookieJar
+from lxml import etree
 from requests.utils import DEFAULT_CA_BUNDLE_PATH, extract_zipped_paths
 
 
@@ -32,6 +33,16 @@ def check_verbose() -> bool:
 def check_debug() -> bool:
     """Return if the debugger is currently active"""
     return 'pydevd' in sys.modules or (hasattr(sys, 'gettrace') and sys.gettrace() is not None)
+
+
+def parse_xml_string(s):
+    parser = etree.XMLParser(recover=True, resolve_entities=False)
+    try:
+        tree = etree.parse(io.BytesIO(s.encode('utf-8')), parser=parser)
+    except:
+        tree = etree.parse(io.BytesIO(s), parser=parser)
+
+    return tree
 
 
 def format_seconds(seconds):

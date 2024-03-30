@@ -20,6 +20,7 @@ import pypdf
 import urllib3
 from aiohttp.client_exceptions import ClientError, ClientResponseError
 from Cryptodome.Cipher import AES
+from lxml import etree
 from requests.sessions import Session
 
 from ebsco_dl.utils import Log
@@ -30,6 +31,7 @@ from ebsco_dl.utils import (
     check_verbose,
     convert_to_aiohttp_cookie_jar,
     format_bytes,
+    parse_xml_string,
     recursive_urlencode,
 )
 
@@ -73,6 +75,12 @@ class EbscoDownloader:
         logging.getLogger("requests").setLevel(logging.WARNING)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
         urllib3.disable_warnings()
+
+   
+
+    @staticmethod
+    def prettify_xml(xml_string):
+        return etree.tostring(parse_xml_string(xml_string), pretty_print=True, encoding='utf-8', xml_declaration=True).decode()
 
     @staticmethod
     def from_query(parsed_querry, parameter_name, default=None):
@@ -656,17 +664,15 @@ class EbscoDownloader:
         # Mimetype
         epub.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
 
+        container_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+        <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+            <rootfiles>
+                <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+        </rootfiles>
+        </container>
+        '''
         # META-INF/container.xml
-        epub.writestr(
-            "META-INF/container.xml",
-            '''<?xml version="1.0" encoding="UTF-8"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-    <rootfiles>
-        <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
-   </rootfiles>
-</container>
-''',
-        )
+        epub.writestr("META-INF/container.xml", self.prettify_xml(container_xml))
 
         # OEBPS/content.opf
         creators = ''
@@ -759,7 +765,7 @@ class EbscoDownloader:
     </spine>
 </package>
 '''
-        epub.writestr('OEBPS/content.opf', content_tpl)
+        epub.writestr('OEBPS/content.opf', self.prettify_xml(content_tpl))
 
         # OEBPS/toc.ncx
         authors_display = " and ".join(authors) if len(authors) > 1 else authors[0]
@@ -782,7 +788,7 @@ class EbscoDownloader:
     </navMap>
 </ncx>
 '''
-        epub.writestr('OEBPS/toc.ncx', toc_tpl)
+        epub.writestr('OEBPS/toc.ncx', self.prettify_xml(toc_tpl))
 
         epub.close()
 

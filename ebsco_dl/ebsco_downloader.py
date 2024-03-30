@@ -731,7 +731,7 @@ class EbscoDownloader:
                 fonts_counter += 1
                 idx = fonts_counter
 
-            epub_manifest += f'<item id="{file_type}{idx}" href="{relative_path}" media-type="{media_type}"/>'
+            epub_manifest += f'<item id="{file_type}{idx}" href="{relative_path}" media-type="{media_type}"/>\n'
 
             # Maybe add html files to index? I'm not sure if included html needs to be added
             # epub_spine += f'<itemref idref="html{file_type}{idx}" />'

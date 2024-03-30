@@ -651,10 +651,10 @@ class EbscoDownloader:
 
         # Compose E-Pub
         epub_path = str(book_directory) + '.epub'
-        epub = zipfile.ZipFile(epub_path, 'w')
+        epub = zipfile.ZipFile(epub_path, 'w', zipfile.ZIP_DEFLATED)
 
         # Mimetype
-        epub.writestr("mimetype", "application/epub+zip")
+        epub.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
 
         # META-INF/container.xml
         epub.writestr(

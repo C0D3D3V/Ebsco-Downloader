@@ -9,3 +9,4 @@ __pycache__
 EbscoDownloader.log
 analyse_js
 venv
+/.vscode/launch.json

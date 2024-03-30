@@ -27,7 +27,7 @@ Alternatively you can install it in a python virtual environment:
 4. Clone this repository inside of that folder: `git clone https://github.com/C0D3D3V/Ebsco-Downloader.git .`
 5. Run `virtualenv venv` to create the virtual environment (on Windows use `venv\Scripts\activate`)
 6. Run `source venv/bin/activate` to activate the virtual environment (on Windows use `venv\Scripts\activate`)
-7. Install `ebsco-dl`: `pip install .`
+7. Install ebsco-dl: `pip install .`
 
 
 

@@ -33,7 +33,7 @@ Alternatively you can install it in a python virtual environment:
 
 ### Usage
 
-For an easy copy of the cookies, you can install an Add-On like `cookies.txt` [for Firefox](https://addons.mozilla.org/de/firefox/addon/cookies-txt/?utm_source=addons.mozilla.org&utm_medium=referral&utm_content=search) or [for Chrome](https://chromewebstore.google.com/detail/get-cookiestxt-clean/ahmnmhfbokciafffnknlekllgcnafnie). Export the cookies of your login page (`ukzn.idm.oclc.org`) to a `cookies.txt` file. 
+For an easy copy of the cookies, you can install an Add-On like `cookies.txt` [for Firefox](https://addons.mozilla.org/de/firefox/addon/cookies-txt/?utm_source=addons.mozilla.org&utm_medium=referral&utm_content=search) or [for Chrome](https://chromewebstore.google.com/detail/get-cookiestxt-clean/ahmnmhfbokciafffnknlekllgcnafnie). Export the cookies of your login page (e.g. of `ukzn.idm.oclc.org` or `gobi3.com`) to a `cookies.txt` file. 
 
 Alternatively, you can create the `cookies.txt` file yourself, keep in mind it needs to be in Netscape format like this (`a3azaHajajaLada` is the cookie):
 
@@ -49,12 +49,12 @@ Alternatively, you can create the `cookies.txt` file yourself, keep in mind it n
 
 Copy the `cookies.txt` file to the directory where you want to download the books. Open a terminal inside of that directory.
 
-Open an ebook on your library in your browser, so you get a link that looks like this: `https://web-p-ebscohost-com.ukzn.idm.oclc.org/ehost/ebookviewer/ebook/bmxlYmtfXzI1MjQxMjhfX0FO0?sid=119ac7c8-1a4f-4b8a-8ea4-deae7f213fa4@redis&vid=0&format=EK&rid=1`
+Open an ebook on your library in your browser, so you get a link that looks like this: `https://web-p-ebscohost-com.ukzn.idm.oclc.org/ehost/ebookviewer/ebook/somebookidentifier?sid=yoursessionid@redis&vid=0&format=EK&rid=1`
 
-or like this: `https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=bbd8ffd2-08e3-4be1-9377-7b7aad871d39%40redis&vid=0&format=EB`
+or like this: `https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=yoursessionid%40redis&vid=0&format=EB`
 
 
-You can download this book now using this command: `ebsco-dl https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=bbd8ffd2-08e3-4be1-9377-7b7aad871d39%40redis&vid=0&format=EB`. The book will be downloaded in the current working directory, you can change this behavior by using the `--path` option.
+You can download this book now using this command: `ebsco-dl https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=yoursessionid%40redis&vid=0&format=EB`. The book will be downloaded in the current working directory, you can change this behavior by using the `--path` option.
 
 If you run into certificate problems you can add `-scv` to the command, so that the certificate is not validated. 
 

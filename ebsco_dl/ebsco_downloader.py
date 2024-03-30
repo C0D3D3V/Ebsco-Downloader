@@ -1,9 +1,11 @@
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
+import uuid
 import zipfile
 from dataclasses import dataclass, field
 from http.cookiejar import MozillaCookieJar
@@ -65,7 +67,7 @@ class EbscoDownloader:
         self.download_url = download_url
         self.skip_cert_verify = skip_cert_verify
         self.max_dl_retries = 10
-        self.max_parallel_dl = 5
+        self.max_parallel_dl = 10
         self.verbose = check_verbose()
 
         logging.getLogger("requests").setLevel(logging.WARNING)
@@ -118,7 +120,7 @@ class EbscoDownloader:
             ebsco_url.book_id = self.get_book_id(ebsco_url.base_webview)
 
         if ebsco_url.book_format == 'EK':
-            self.download_epub(ebsco_url, session)
+            asyncio.run(self.download_epub(ebsco_url, session))
         elif ebsco_url.book_format == 'EB':
             self.download_pdf(ebsco_url, session)
         else:
@@ -269,9 +271,7 @@ class EbscoDownloader:
                 Log.debug(f"Failed to check if download can be continued on fail: {err}")
         return False
 
-    async def batch_download_pdf_parts(
-        self, dl_jobs: List[str], book_path: Path, ebsco_url: EbscoUrl, is_essential: bool = True
-    ) -> List[bool]:
+    async def batch_download_pdf_parts(self, dl_jobs: List[str], book_path: Path, ebsco_url: EbscoUrl) -> List[Path]:
         """
         @param dl_jobs: List of rel_file_path
         @param is_essential: Applied to all jobs
@@ -280,11 +280,10 @@ class EbscoDownloader:
         dl_results = await asyncio.gather(
             *[self.download_pdf_part_from_ebsco(dl_job, book_path, ebsco_url, semaphore) for dl_job in dl_jobs]
         )
-        if is_essential:
-            for idx, dl_result in enumerate(dl_results):
-                if not dl_result[0]:
-                    Log.error(f'Error: {dl_jobs[idx]} is essential. Abort! Please try again later!')
-                    exit(1)
+        for idx, dl_result in enumerate(dl_results):
+            if not dl_result[0]:
+                Log.error(f'Error: {dl_jobs[idx]} is essential. Abort! Please try again later!')
+                exit(1)
         return [tup[1] for tup in dl_results]
 
     async def download_pdf_part_from_ebsco(
@@ -450,7 +449,95 @@ class EbscoDownloader:
 
         return decrypted_data.decode('utf-8')
 
-    def download_epub(self, ebsco_url: EbscoUrl, session: Session):
+    async def download_epub_page(
+        self,
+        semaphore: asyncio.Semaphore,
+        artifact_url: str,
+        artifact_file_path,
+        page_id: str,
+        book_key: str,
+        conn_timeout: int = 10,
+        read_timeout: int = 1800,
+    ):
+        async with semaphore, aiohttp.ClientSession(
+            cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
+        ) as session:
+            ssl_param = False if self.skip_cert_verify else None
+            async with session.request(
+                "GET", artifact_url, headers=self.stdHeader, raise_for_status=True, ssl=ssl_param
+            ) as response:
+                if not response.ok or str(response.url) != artifact_url:
+                    raise RuntimeError(f'We cot rate limited! {response.reason}')
+
+                Log.info(f'Loaded artifact url: `{artifact_url}`')
+                response_text = await response.text()
+
+                xhtml_head = self.first_match(
+                    r'([\s\S]*?)<script id=\'content-body\'', response_text, f'{page_id} artifact xhtml head'
+                )
+                encrypted_content = self.first_match(
+                    r'<script id=\'content-body\'[^>]+>([^<]+)</script>', response_text, f'{page_id} artifact content'
+                )
+                xhtml_footer = '\r\n</body> </html>'
+                decrypted = self.decrypt(encrypted_content[:-24], book_key, encrypted_content[-24:])
+
+                # Find Header includes
+                artifact_includes = re.findall(r'src\s*=\s*"([^"]+)"', xhtml_head)
+                artifact_includes += re.findall(r'href\s*=\s*"([^"]+)"', xhtml_head)
+                # Find Body includes
+                artifact_includes += re.findall(r'src\s*=\s*"([^"]+)"', decrypted)
+
+                async with aiofiles.open(artifact_file_path, 'w', encoding='utf-8') as fs:
+                    await fs.write(xhtml_head)
+                    await fs.write(decrypted)
+                    await fs.write(xhtml_footer)
+
+                Log.info(f'Written artifact: `{str(artifact_file_path)}`')
+                return artifact_includes
+
+    async def download_epub_include(
+        self,
+        semaphore: asyncio.Semaphore,
+        artifact_url: str,
+        artifact_file_path,
+        all_css_includes: List[str],
+        conn_timeout: int = 10,
+        read_timeout: int = 1800,
+    ):
+        async with semaphore, aiohttp.ClientSession(
+            cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
+        ) as session:
+            ssl_param = False if self.skip_cert_verify else None
+            async with session.request(
+                "GET", artifact_url, headers=self.stdHeader, raise_for_status=True, ssl=ssl_param
+            ) as response:
+                if not response.ok or str(response.url) != artifact_url:
+                    raise RuntimeError(f'We cot rate limited! {response.reason}')
+
+                Log.info(f'Loaded artifact url: `{artifact_url}`')
+
+                if artifact_url.endswith('.css'):
+                    response_text = await response.text()
+                    artifact_includes = re.findall(r'url\s*\("?([^")]+)"?\)', response_text)
+                    for artifact_include in artifact_includes:
+                        artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
+                        if artifact_include not in all_css_includes:
+                            all_css_includes.append(artifact_include)
+
+                async with aiofiles.open(artifact_file_path, 'wb') as fs:
+                    await fs.write(await response.read())
+                Log.info(f'Written artifact: `{str(artifact_file_path)}`')
+
+    @staticmethod
+    def escape(str_xml: str):
+        str_xml = str_xml.replace("&", "&amp;")
+        str_xml = str_xml.replace("<", "&lt;")
+        str_xml = str_xml.replace(">", "&gt;")
+        str_xml = str_xml.replace("\"", "&quot;")
+        str_xml = str_xml.replace("'", "&apos;")
+        return str_xml
+
+    async def download_epub(self, ebsco_url: EbscoUrl, session: Session):
         # Ground truth is version 18.842.0.1477 of EBSCO, for older EBSCO version use older versions of ebsco-dl
         # https://github.com/C0D3D3V/Ebsco-Downloader/tree/5ce8f159975b9e544bc8d425f96b16591a2b057e
 
@@ -507,6 +594,8 @@ class EbscoDownloader:
         epub_content_files = []
         epub_include_files = []
 
+        page_tasks = []
+        semaphore_pages = asyncio.Semaphore(self.max_parallel_dl)
         for page_id in all_pages_ids:
             page_filename = '/'.join(page_id.split('/')[4:])
             artifact_file_path = book_path_oebps / page_filename
@@ -518,49 +607,17 @@ class EbscoDownloader:
                 + f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
                 + f'/{ebsco_url.session_id}/0/{page_id}'
             )
-
-            Log.info(f'Loading artifact url: `{artifact_url}`')
-            response = session.get(
-                artifact_url,
-                headers=self.stdHeader,
-                verify=(not self.skip_cert_verify),
-                allow_redirects=True,
-                timeout=60,
+            page_tasks.append(
+                self.download_epub_page(semaphore_pages, artifact_url, artifact_file_path, page_id, book_key)
             )
 
-            if not response.ok or response.url != artifact_url:
-                raise RuntimeError(f'We cot rate limited! {response.reason}')
+        result = await asyncio.gather(*page_tasks)
 
-            Log.info('Loaded artifact')
-
-            # Compose xhtml
-            xhtml_head = self.first_match(
-                r'([\s\S]*?)<script id=\'content-body\'', response.text, f'{page_id} artifact xhtml head'
-            )
-            encrypted_content = self.first_match(
-                r'<script id=\'content-body\'[^>]+>([^<]+)</script>', response.text, f'{page_id} artifact content'
-            )
-            xhtml_footer = '\r\n</body> </html>'
-
-            Log.info('Decrypting artifact')
-            decrypted = self.decrypt(encrypted_content[:-24], book_key, encrypted_content[-24:])
-
-            # Find Header includes
-            artifact_includes = re.findall(r'src\s*=\s*"([^"]+)"', xhtml_head)
-            artifact_includes += re.findall(r'href\s*=\s*"([^"]+)"', xhtml_head)
-            # Find Body includes
-            artifact_includes += re.findall(r'src\s*=\s*"([^"]+)"', decrypted)
-
+        for artifact_includes in result:
             for artifact_include in artifact_includes:
                 artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
                 if artifact_include not in all_includes:
                     all_includes.append(artifact_include)
-
-            # Save Artifact to disk
-            with open(str(artifact_file_path), 'w', encoding='utf-8') as fs:
-                fs.write(xhtml_head)
-                fs.write(decrypted)
-                fs.write(xhtml_footer)
 
         # Download includes (Images, Stylesheets, Fonts)
         base_artifact = all_pages_ids[0]
@@ -572,33 +629,23 @@ class EbscoDownloader:
             + f'/{ebsco_url.session_id}/0/{base_artifact_path}'
         )
 
-        for include in all_includes:
-            artifact_url = base_artifact_url + include
+        while len(all_includes) > 0:
+            all_css_includes = []
+            include_tasks = []
+            semaphore_includes = asyncio.Semaphore(self.max_parallel_dl)
+            for include in all_includes:
+                artifact_url = base_artifact_url + include
 
-            artifact_file_path = book_path_oebps / include
-            os.makedirs(str(artifact_file_path.parent), exist_ok=True)
+                artifact_file_path = book_path_oebps / include
+                os.makedirs(str(artifact_file_path.parent), exist_ok=True)
 
-            epub_include_files.append(artifact_file_path)
+                epub_include_files.append(artifact_file_path)
+                include_tasks.append(
+                    self.download_epub_include(semaphore_includes, artifact_url, artifact_file_path, all_css_includes)
+                )
 
-            Log.info(f'Loading artifact url: `{artifact_url}`')
-            response = session.get(
-                artifact_url,
-                headers=self.stdHeader,
-                verify=(not self.skip_cert_verify),
-                allow_redirects=True,
-                timeout=60,
-            )
-            Log.info('Loaded artifact')
-
-            if include.endswith('css'):
-                artifact_includes = re.findall(r'url\s*\("?([^")]+)"?\)', response.text)
-                for artifact_include in artifact_includes:
-                    artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
-                    if artifact_include not in all_includes:
-                        all_includes.append(artifact_include)
-
-            with open(str(artifact_file_path), 'wb') as fs:
-                fs.write(response.content)
+            await asyncio.gather(*include_tasks)
+            all_includes = all_css_includes
 
         # session.cookies.save(ignore_discard=True, ignore_expires=True)
 
@@ -624,7 +671,7 @@ class EbscoDownloader:
         # OEBPS/content.opf
         creators = ''
         for idx, author in enumerate(authors):
-            creators += f'<dc:creator id="creator{idx}" opf:role="aut">{author}</dc:creator>'
+            creators += f'<dc:creator id="creator{idx}" opf:role="aut">{self.escape(author)}</dc:creator>'
 
         epub_manifest = ''
         epub_spine = ''
@@ -692,14 +739,18 @@ class EbscoDownloader:
 
         epub_manifest += '<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>'
 
-        content_tpl = f'''<?xml version="1.0"?>
-<package version="2.0" xmlns="http://www.idpf.org/2007/opf">
+        epub_uuid = str(uuid.UUID(hashlib.sha256(ebsco_url.book_id.encode()).hexdigest()[:32]))
+        content_tpl = f'''<?xml version='1.0' encoding='UTF-8'?>
+<package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="id">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
-    <dc:title>{book_title}</dc:title>
-    <dc:date>{publication_year}</dc:date>
-    <dc:language>{language}</dc:language>
+    <dc:title>{self.escape(book_title)}</dc:title>
+    <dc:date>{self.escape(publication_year)}</dc:date>
+    <dc:language>{self.escape(language)}</dc:language>
+    <dc:identifier
+        id="id"
+        opf:scheme="uuid">{epub_uuid}</dc:identifier>
     {creators}
-    <metadata/>
+    </metadata>
     <manifest>
         {epub_manifest}
     </manifest>

@@ -76,11 +76,11 @@ class EbscoDownloader:
         logging.getLogger("urllib3").setLevel(logging.WARNING)
         urllib3.disable_warnings()
 
-   
-
     @staticmethod
     def prettify_xml(xml_string):
-        return etree.tostring(parse_xml_string(xml_string), pretty_print=True, encoding='utf-8', xml_declaration=True).decode()
+        return etree.tostring(
+            parse_xml_string(xml_string), pretty_print=True, encoding='utf-8', xml_declaration=True
+        ).decode()
 
     @staticmethod
     def from_query(parsed_querry, parameter_name, default=None):
@@ -684,7 +684,7 @@ class EbscoDownloader:
 
         # build spine and add all normal xhtml files to manifest
         for idx, epub_content_file in enumerate(epub_content_files):
-            relative_path = str(epub_content_file.relative_to(book_path_oebps))
+            relative_path = epub_content_file.relative_to(book_path_oebps).as_posix()
 
             epub_manifest += f'<item id="html{idx + 1}" href="{relative_path}" media-type="application/xhtml+xml"/>\n'
             epub_spine += f'<itemref idref="html{idx + 1}" />\n'
@@ -710,7 +710,7 @@ class EbscoDownloader:
         fonts_counter = 0
         html_counter = len(epub_content_files)
         for epub_include_file in epub_include_files:
-            relative_path = str(epub_include_file.relative_to(book_path_oebps))
+            relative_path = epub_include_file.relative_to(book_path_oebps).as_posix()
 
             file_ext = str(epub_include_file).rsplit('.', maxsplit=1)[-1]
             if file_ext not in mimetype_dict:

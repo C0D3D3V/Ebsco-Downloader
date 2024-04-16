@@ -19,7 +19,9 @@ I am not liable for any violation of the law that applies in your country nor fo
 `ebsco-dl` is not available on pypi currently, so you have to install it by cloning this repository to your disk and run `pip install .` inside the folder that contains the `setup.py`.
 4. Read the Usage section
 
-Alternatively you can install it in a python virtual environment:
+
+<details>
+  <summary> For Experts: Click here for alternatively Setup using a virtual environment</summary>
 
 1. Install [Python](https://www.python.org/) >=3.7 and [git](https://git-scm.com/downloads)
 2. Install  `virtualenv`: `pip install virtualenv`
@@ -30,6 +32,8 @@ Alternatively you can install it in a python virtual environment:
 7. Install ebsco-dl: `pip install .`
 
 
+To deactivate the virtual environment run: `deactivate`
+</details>
 
 ### Usage
 

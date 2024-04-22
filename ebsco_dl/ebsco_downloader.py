@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import List
-from urllib.parse import ParseResult, parse_qs, urlparse
+from urllib.parse import ParseResult, parse_qs, unquote, urlparse
 
 import aiofiles
 import aiohttp
@@ -474,8 +474,8 @@ class EbscoDownloader:
             async with session.request(
                 "GET", artifact_url, headers=self.stdHeader, raise_for_status=True, ssl=ssl_param
             ) as response:
-                if not response.ok or str(response.url) != artifact_url:
-                    raise RuntimeError(f'We cot rate limited! {response.reason}')
+                if not response.ok or str(response.url) != unquote(artifact_url):
+                    raise RuntimeError(f'We got rate limited! {response.reason}')
 
                 Log.info(f'Loaded artifact url: `{artifact_url}`')
                 response_text = await response.text()
@@ -519,7 +519,7 @@ class EbscoDownloader:
             async with session.request(
                 "GET", artifact_url, headers=self.stdHeader, raise_for_status=True, ssl=ssl_param
             ) as response:
-                if not response.ok or str(response.url) != artifact_url:
+                if not response.ok or str(response.url) != unquote(artifact_url):
                     raise RuntimeError(f'We cot rate limited! {response.reason}')
 
                 Log.info(f'Loaded artifact url: `{artifact_url}`')

@@ -8,6 +8,7 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 
+import colorlog
 from colorama import just_fix_windows_console
 
 from ebsco_dl.ebsco_downloader import EbscoDownloader
@@ -32,12 +33,23 @@ def setup_logger(storage_path: str, verbose=False):
     log_handler = RotatingFileHandler(
         log_file, mode='a', maxBytes=1 * 1024 * 1024, backupCount=2, encoding='utf-8', delay=0
     )
+    stdout_log_handler = colorlog.StreamHandler()
+    if sys.stdout.isatty() and not verbose:
+        stdout_log_handler.setFormatter(colorlog.ColoredFormatter('%(log_color)s%(asctime)s %(message)s', '%H:%M:%S'))
+    else:
+        stdout_log_handler.setFormatter(
+            colorlog.ColoredFormatter(
+                '%(log_color)s%(asctime)s  %(levelname)s  {%(module)s}  %(message)s', '%Y-%m-%d %H:%M:%S'
+            )
+        )
 
     log_handler.setFormatter(log_formatter)
     if verbose:
         log_handler.setLevel(logging.DEBUG)
+        stdout_log_handler.setLevel(logging.DEBUG)
     else:
         log_handler.setLevel(logging.INFO)
+        stdout_log_handler.setLevel(logging.DEBUG)
 
     app_log = logging.getLogger()
     if verbose:
@@ -45,6 +57,7 @@ def setup_logger(storage_path: str, verbose=False):
     else:
         app_log.setLevel(logging.INFO)
     app_log.addHandler(log_handler)
+    app_log.addHandler(stdout_log_handler)
 
     logging.info('--- ebsco-dl started ---------------------')
     Log.info('Ebsco Downloader starting...')

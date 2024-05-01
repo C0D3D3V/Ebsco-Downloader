@@ -57,6 +57,7 @@ Open an ebook on your library in your browser, so you get a link that looks like
 
 or like this: `https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=yoursessionid%40redis&vid=0&format=EB`
 
+or like this: `https://web.p.ebscohost.com/ehost/ebookviewer/ebook/somebookidentifier?sid=yoursessionid@redis&vid=3&lpid=lp_5&format=EB`
 
 You can download this book now using this command: `ebsco-dl https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=yoursessionid%40redis&vid=0&format=EB`. The book will be downloaded in the current working directory, you can change this behavior by using the `--path` option.
 

@@ -36,6 +36,7 @@ setup(
         'requests>=2.28.1',
         'colorama>=0.4.6',
         'pypdf>=4.1.0',
+        'colorlog>=6.7.0',
         'lxml>=5.1.1',
         'aiohttp>=3.9.3',
         'aiofiles>=23.2.1',

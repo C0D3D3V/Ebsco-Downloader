@@ -181,9 +181,12 @@ def convert_to_aiohttp_cookie_jar(mozilla_cookie_jar: http.cookiejar.MozillaCook
                         # "samesite": "SameSite",
                     }
                 )
-                # pylint: disable=protected-access
-                morsel.set(cookie.name, cookie.value, http.cookies._quote(cookie.value))
-                aiohttp_cookie_jar._cookies[(cookie_domain, cookie_path)][cookie_name] = morsel
+                try:
+                    # pylint: disable=protected-access
+                    morsel.set(cookie.name, cookie.value, http.cookies._quote(cookie.value))
+                    aiohttp_cookie_jar._cookies[(cookie_domain, cookie_path)][cookie_name] = morsel
+                except http.cookies.CookieError as e:
+                    logging.debug("Could not set cookie: %s", e)
 
     return aiohttp_cookie_jar
 
@@ -680,23 +683,20 @@ class SslHelper:
 
     @classmethod
     @lru_cache(maxsize=4)
-    def get_ssl_context(cls, skip_cert_verify: bool, allow_insecure_ssl: bool, use_simple_ciphers: bool):
+    def get_ssl_context(cls, skip_cert_verify: bool, allow_insecure_ssl: bool, use_all_ciphers: bool):
         if not skip_cert_verify:
             ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
             cls.load_default_certs(ssl_context)
         else:
             ssl_context = ssl._create_unverified_context()  # pylint: disable=protected-access
-
         if allow_insecure_ssl:
             # This allows connections to legacy insecure servers
             # https://www.openssl.org/docs/manmaster/man3/SSL_CTX_set_options.html#SECURE-RENEGOTIATION
             # Be warned the insecure renegotiation allows an attack, see:
             # https://nvd.nist.gov/vuln/detail/CVE-2009-3555
             ssl_context.options |= 0x4  # set ssl.OP_LEGACY_SERVER_CONNECT bit
-        if use_simple_ciphers:
-            pass
-            # ssl_context.options = 0
-            # ssl_context.set_ciphers("AES256-SHA")
+        if use_all_ciphers:
+            ssl_context.set_ciphers('ALL')
 
         return ssl_context
 
@@ -716,12 +716,12 @@ class SslHelper:
             )
 
     @classmethod
-    def custom_requests_session(cls, skip_cert_verify: bool, allow_insecure_ssl: bool, use_simple_ciphers: bool):
+    def custom_requests_session(cls, skip_cert_verify: bool, allow_insecure_ssl: bool, use_all_ciphers: bool):
         """
         Return a new requests session with custom SSL context
         """
         session = requests.Session()
-        ssl_context = cls.get_ssl_context(skip_cert_verify, allow_insecure_ssl, use_simple_ciphers)
+        ssl_context = cls.get_ssl_context(skip_cert_verify, allow_insecure_ssl, use_all_ciphers)
         session.mount('https://', cls.CustomHttpAdapter(ssl_context))
         session.verify = not skip_cert_verify
         return session

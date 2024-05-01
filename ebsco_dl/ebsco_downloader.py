@@ -280,7 +280,7 @@ class EbscoDownloader:
         for page in all_pages:
             page_artifact_id = page.get('artifactId')
             page_artifact_id = page_artifact_id.split('#')[0]
-            if page_artifact_id not in all_pages_ids:
+            if page_artifact_id not in all_pages_ids and page_artifact_id != 'previewlimit':
                 all_pages_ids.append(page_artifact_id)
 
         # Extract Meta data

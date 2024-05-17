@@ -148,7 +148,7 @@ class EbscoDownloader:
 
         # iframe_url = self.first_match(r'"ebookViewerServiceUrl"\s*:\s*"([^"]+)"', webview, 'Viewer iframe href')
         iframe_url = self.first_match(
-            r'<iframe id="ViewerServiceFrame" title=Viewer name="accessibleViewport" src="([^"]+)"',
+            r'<iframe id="ViewerServiceFrame" [^>]* src="([^"]+)"',
             ebsco_url.base_webview,
             'Viewer iframe href',
             '',

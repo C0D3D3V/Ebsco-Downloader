@@ -148,7 +148,7 @@ class EbscoDownloader:
 
         # iframe_url = self.first_match(r'"ebookViewerServiceUrl"\s*:\s*"([^"]+)"', webview, 'Viewer iframe href')
         iframe_url = self.first_match(
-            r'<iframe id="ViewerServiceFrame" [^>]* src="([^"]+)"',
+            r'<iframe id="ViewerServiceFrame" [^>]*src="([^"]+)"',
             ebsco_url.base_webview,
             'Viewer iframe href',
             '',
@@ -599,7 +599,7 @@ class EbscoDownloader:
                     artifact_includes = re.findall(r'url\s*\("?([^")]+)"?\)', response_text)
                     for artifact_include in artifact_includes:
                         artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
-                        if artifact_include not in all_css_includes:
+                        if artifact_include not in all_css_includes and not artifact_include.startswith(('http:', 'https:')):
                             all_css_includes.append(artifact_include)
 
                 async with aiofiles.open(artifact_file_path, 'wb') as fs:
@@ -703,7 +703,7 @@ class EbscoDownloader:
                         f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
                         + f'/{ebsco_url.session_id}/0/{page_id}'
                     ),
-                    query=None
+                    query=None,
                 ).geturl()
 
             page_tasks.append(
@@ -717,7 +717,7 @@ class EbscoDownloader:
         for artifact_includes in result:
             for artifact_include in artifact_includes:
                 artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
-                if artifact_include not in all_includes:
+                if artifact_include not in all_includes and not artifact_include.startswith(('http:', 'https:')):
                     all_includes.append(artifact_include)
 
         # Download includes (Images, Stylesheets, Fonts)
@@ -731,7 +731,7 @@ class EbscoDownloader:
                     + str(ebsco_url.on_iframe_json['clientData']['currentRecord']['Term'])
                     + f'/{ebsco_url.session_id}/{base_artifact_path}'
                 ),
-                    query=None,
+                query=None,
             ).geturl()
         else:
             base_artifact_url = ebsco_url.parsed_url._replace(
@@ -739,8 +739,7 @@ class EbscoDownloader:
                     f'/ehost/ebookviewer/artifact/{ebsco_url.book_id}/{ebsco_url.book_format}'
                     + f'/{ebsco_url.session_id}/0/{base_artifact_path}'
                 ),
-
-                    query=None,
+                query=None,
             ).geturl()
 
         while len(all_includes) > 0:
@@ -755,9 +754,7 @@ class EbscoDownloader:
 
                 epub_include_files.append(artifact_file_path)
                 include_tasks.append(
-                    self.download_epub_include(
-                        semaphore_includes, artifact_url, artifact_file_path, all_css_includes
-                    )
+                    self.download_epub_include(semaphore_includes, artifact_url, artifact_file_path, all_css_includes)
                 )
 
             await asyncio.gather(*include_tasks)

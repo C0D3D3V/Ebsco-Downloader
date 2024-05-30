@@ -588,9 +588,14 @@ class EbscoDownloader:
             cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
         ) as session:
             async with session.request(
-                "GET", artifact_url, headers=self.stdHeader, raise_for_status=True, ssl=ssl_context
+                "GET", artifact_url, headers=self.stdHeader, raise_for_status=False, ssl=ssl_context
             ) as response:
-                if not response.ok or unquote(str(response.url)) != unquote(artifact_url):
+                if not response.ok:
+                    if artifact_url not in skipped_includes:
+                        logging.error('Could not download %s, epub could be broken.', artifact_url)
+                        skipped_includes.append(artifact_url)
+                    return
+                if unquote(str(response.url)) != unquote(artifact_url):
                     raise RuntimeError(f'We got rate limited! {response.reason}')
 
                 Log.info(f'Loaded artifact url: `{artifact_url}`')

@@ -579,6 +579,7 @@ class EbscoDownloader:
         artifact_url: str,
         artifact_file_path,
         all_css_includes: List[str],
+        skipped_includes: List[str],
         conn_timeout: int = 10,
         read_timeout: int = 1800,
     ):
@@ -598,8 +599,17 @@ class EbscoDownloader:
                     response_text = await response.text()
                     artifact_includes = re.findall(r'url\s*\("?([^")]+)"?\)', response_text)
                     for artifact_include in artifact_includes:
+                        real_artifact_include = artifact_includes
                         artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
-                        if artifact_include not in all_css_includes and not artifact_include.startswith(('http:', 'https:')):
+
+                        if artifact_include.startswith(('http:', 'https:')):
+                            # skip external includes
+                            if artifact_include not in skipped_includes:
+                                skipped_includes.append(artifact_include)
+                                logging.warning('Skipping external include: %s', real_artifact_include)
+                            continue
+
+                        if artifact_include not in all_css_includes:
                             all_css_includes.append(artifact_include)
 
                 async with aiofiles.open(artifact_file_path, 'wb') as fs:
@@ -667,6 +677,7 @@ class EbscoDownloader:
         os.makedirs(str(book_path_oebps), exist_ok=True)
 
         all_includes = []
+        skipped_includes = []
         epub_content_files = []
         epub_include_files = []
 
@@ -716,8 +727,17 @@ class EbscoDownloader:
 
         for artifact_includes in result:
             for artifact_include in artifact_includes:
+                real_artifact_include = artifact_include
                 artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
-                if artifact_include not in all_includes and not artifact_include.startswith(('http:', 'https:')):
+
+                if artifact_include.startswith(('http:', 'https:')):
+                    # skip external includes
+                    if artifact_include not in skipped_includes:
+                        skipped_includes.append(artifact_include)
+                        logging.warning('Skipping external include: %s', real_artifact_include)
+                    continue
+
+                if artifact_include not in all_includes:
                     all_includes.append(artifact_include)
 
         # Download includes (Images, Stylesheets, Fonts)
@@ -754,7 +774,9 @@ class EbscoDownloader:
 
                 epub_include_files.append(artifact_file_path)
                 include_tasks.append(
-                    self.download_epub_include(semaphore_includes, artifact_url, artifact_file_path, all_css_includes)
+                    self.download_epub_include(
+                        semaphore_includes, artifact_url, artifact_file_path, all_css_includes, skipped_includes
+                    )
                 )
 
             await asyncio.gather(*include_tasks)

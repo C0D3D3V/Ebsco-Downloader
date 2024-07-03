@@ -577,6 +577,7 @@ class EbscoDownloader:
         self,
         semaphore: asyncio.Semaphore,
         artifact_url: str,
+        artifact_url_path: str,
         artifact_file_path,
         all_css_includes: List[str],
         skipped_includes: List[str],
@@ -602,10 +603,9 @@ class EbscoDownloader:
 
                 if artifact_url.lower().endswith('.css'):
                     response_text = await response.text()
-                    artifact_includes = re.findall(r'url\s*\("?([^")]+)"?\)', response_text)
+                    artifact_includes = re.findall(r'url\s*\(["\']?([^"\')]+)["\']?\)', response_text)
                     for artifact_include in artifact_includes:
-                        real_artifact_include = artifact_includes
-                        artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
+                        real_artifact_include = artifact_include
 
                         if artifact_include.startswith(('http:', 'https:')):
                             # skip external includes
@@ -613,9 +613,15 @@ class EbscoDownloader:
                                 skipped_includes.append(artifact_include)
                                 logging.warning('Skipping external include: %s', real_artifact_include)
                             continue
-
-                        if artifact_include not in all_css_includes:
-                            all_css_includes.append(artifact_include)
+                        
+                        try:
+                            own_directory = os.path.dirname(artifact_url_path)
+                            correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
+                        except BaseException:
+                            correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
+                            
+                        if correct_path not in all_css_includes:
+                            all_css_includes.append(correct_path)
 
                 async with aiofiles.open(artifact_file_path, 'wb') as fs:
                     await fs.write(await response.read())
@@ -771,16 +777,21 @@ class EbscoDownloader:
             all_css_includes = []
             include_tasks = []
             semaphore_includes = asyncio.Semaphore(self.max_parallel_dl)
-            for include in all_includes:
-                artifact_url = base_artifact_url + include
+            for artifact_url_path in all_includes:
+                artifact_url = base_artifact_url + artifact_url_path
 
-                artifact_file_path = book_path_oebps / include
+                artifact_file_path = book_path_oebps / artifact_url_path
                 os.makedirs(str(artifact_file_path.parent), exist_ok=True)
 
                 epub_include_files.append(artifact_file_path)
                 include_tasks.append(
                     self.download_epub_include(
-                        semaphore_includes, artifact_url, artifact_file_path, all_css_includes, skipped_includes
+                        semaphore_includes,
+                        artifact_url,
+                        artifact_url_path,
+                        artifact_file_path,
+                        all_css_includes,
+                        skipped_includes,
                     )
                 )
 

@@ -527,6 +527,7 @@ class EbscoDownloader:
         book_key: str,
         headers: Dict,
         ebsco_url: EbscoUrl,
+        page_file_path: str,
         conn_timeout: int = 10,
         read_timeout: int = 1800,
     ):
@@ -539,6 +540,11 @@ class EbscoDownloader:
             ) as response:
                 if not response.ok or unquote(str(response.url)) != unquote(artifact_url):
                     raise RuntimeError(f'We got rate limited! {response.reason}')
+
+                if response.content_type == 'text/html':
+                    response_text = await response.text()
+                    if response_text.startswith('<script type="text/javascript">') and 'pageError' in response_text:
+                        raise RuntimeError(f'Could not download {artifact_url}, epub is broken.')
 
                 Log.info(f'Loaded artifact url: `{artifact_url}`')
                 response_text = await response.text()
@@ -571,7 +577,23 @@ class EbscoDownloader:
                     await fs.write(xhtml_footer)
 
                 Log.info(f'Written artifact: `{str(artifact_file_path)}`')
-                return artifact_includes
+
+                result_artifact_includes = []
+                # fix artifact_includes paths
+                for artifact_include in artifact_includes:
+                    # Ignore URLs, only download relative and absolute paths
+                    if urlparse(artifact_include).scheme == '':
+                        try:
+                            own_directory = os.path.dirname(page_file_path)
+                            correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
+                        except BaseException:
+                            correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
+
+                        result_artifact_includes.append(correct_path)
+                    else:
+                        logging.warning('Skipping external include: %s', artifact_include)
+
+                return result_artifact_includes
 
     async def download_epub_include(
         self,
@@ -601,6 +623,14 @@ class EbscoDownloader:
 
                 Log.info(f'Loaded artifact url: `{artifact_url}`')
 
+                if response.content_type == 'text/html':
+                    response_text = await response.text()
+                    if response_text.startswith('<script type="text/javascript">') and 'pageError' in response_text:
+                        if artifact_url not in skipped_includes:
+                            logging.error('Could not download %s, epub could be broken.', artifact_url)
+                            skipped_includes.append(artifact_url)
+                        return
+
                 if artifact_url.lower().endswith('.css'):
                     response_text = await response.text()
                     artifact_includes = re.findall(r'url\s*\(["\']?([^"\')]+)["\']?\)', response_text)
@@ -613,13 +643,13 @@ class EbscoDownloader:
                                 skipped_includes.append(artifact_include)
                                 logging.warning('Skipping external include: %s', real_artifact_include)
                             continue
-                        
+
                         try:
                             own_directory = os.path.dirname(artifact_url_path)
                             correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
                         except BaseException:
                             correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
-                            
+
                         if correct_path not in all_css_includes:
                             all_css_includes.append(correct_path)
 
@@ -700,8 +730,8 @@ class EbscoDownloader:
             headers['Authorization'] = f"Basic {ebsco_url.old_digital_obj['evsToken']}, Bearer "
 
         for page_id in all_pages_ids:
-            page_filename = '/'.join(page_id.split('/')[4:])
-            artifact_file_path = book_path_oebps / page_filename
+            page_file_path = '/'.join(page_id.split('/')[4:])
+            artifact_file_path = book_path_oebps / page_file_path
             os.makedirs(str(artifact_file_path.parent), exist_ok=True)
             epub_content_files.append(artifact_file_path)
 
@@ -730,24 +760,22 @@ class EbscoDownloader:
 
             page_tasks.append(
                 self.download_epub_page(
-                    semaphore_pages, artifact_url, artifact_file_path, page_id, book_key, headers, ebsco_url
+                    semaphore_pages,
+                    artifact_url,
+                    artifact_file_path,
+                    page_id,
+                    book_key,
+                    headers,
+                    ebsco_url,
+                    page_file_path,
                 )
             )
 
         result = await asyncio.gather(*page_tasks)
 
+        # Collect all artifacts
         for artifact_includes in result:
             for artifact_include in artifact_includes:
-                real_artifact_include = artifact_include
-                artifact_include = re.sub(r'^(\.\./)+', '', artifact_include)
-
-                if artifact_include.startswith(('http:', 'https:')):
-                    # skip external includes
-                    if artifact_include not in skipped_includes:
-                        skipped_includes.append(artifact_include)
-                        logging.warning('Skipping external include: %s', real_artifact_include)
-                    continue
-
                 if artifact_include not in all_includes:
                     all_includes.append(artifact_include)
 

@@ -570,6 +570,7 @@ class EbscoDownloader:
                 artifact_includes += re.findall(r'href\s*=\s*"([^"]+)"', xhtml_head)
                 # Find Body includes
                 artifact_includes += re.findall(r'src\s*=\s*"([^"]+)"', decrypted)
+                artifact_includes += re.findall(r'<image[^>]+href\s*=\s*"([^"]+)"', decrypted)
 
                 async with aiofiles.open(artifact_file_path, 'w', encoding='utf-8') as fs:
                     await fs.write(xhtml_head)
@@ -730,7 +731,9 @@ class EbscoDownloader:
             headers['Authorization'] = f"Basic {ebsco_url.old_digital_obj['evsToken']}, Bearer "
 
         for page_id in all_pages_ids:
-            page_file_path = '/'.join(page_id.split('/')[4:])
+            page_file_path = (
+                '/'.join(page_id.split('/')[4:]) if len(page_id.split('/')) > 4 else '/'.join(page_id.split('/')[3:])
+            )
             artifact_file_path = book_path_oebps / page_file_path
             os.makedirs(str(artifact_file_path.parent), exist_ok=True)
             epub_content_files.append(artifact_file_path)
@@ -781,7 +784,11 @@ class EbscoDownloader:
 
         # Download includes (Images, Stylesheets, Fonts)
         base_artifact = all_pages_ids[0]
-        base_artifact_path = '/'.join(base_artifact.split('/')[:4]) + '/'
+        base_artifact_path = (
+            '/'.join(base_artifact.split('/')[:4]) + '/'
+            if len(base_artifact.split('/')) > 4
+            else '/'.join(base_artifact.split('/')[:3]) + '/'
+        )
 
         if ebsco_url.is_old_API:
             base_artifact_url = ebsco_url.parsed_iframe_url._replace(

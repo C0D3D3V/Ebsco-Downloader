@@ -297,7 +297,7 @@ class EbscoDownloader:
         pdf_content_files = asyncio.run(self.batch_download_pdf_parts(all_pages_ids, book_path, ebsco_url))
 
         Log.info('Merging pdf artifacts to one pdf')
-        merger = pypdf.PdfMerger()
+        merger = pypdf.PdfWriter()
         for idx, pdf_page in enumerate(pdf_content_files):
             merger.append(pdf_page)
             Log.info(f'Merged artifact {idx}')
@@ -308,6 +308,7 @@ class EbscoDownloader:
 
         Log.info('Writing PDF to disk (this can take long for big PDFs)')
         merger.write(str(book_path) + '.pdf')
+        merger.close()
 
     async def get_can_continue_on_fail(self, url, session, old_headers, ssl_context):
         try:

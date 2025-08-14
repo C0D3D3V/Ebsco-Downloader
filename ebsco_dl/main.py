@@ -7,10 +7,12 @@ import os
 import sys
 import traceback
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urlparse
 
 import colorlog
 from colorama import just_fix_windows_console
 
+from ebsco_dl.ebsco_2_downloader import Ebsco2Downloader
 from ebsco_dl.ebsco_downloader import EbscoDownloader
 from ebsco_dl.utils import Log, ProcessLock, check_debug, check_verbose
 from ebsco_dl.version import __version__
@@ -181,7 +183,16 @@ def main(args=None):
         if not check_debug():
             ProcessLock.lock(storage_path)
 
-        EbscoDownloader(storage_path, args.url[0], skip_cert_verify).run()
+        # Parse download URL
+        parsed_url = urlparse(args.url[0])
+
+        # Check if it is a valid URL
+        if parsed_url.path.startswith("/ehost/ebookviewer/ebook"):
+            EbscoDownloader(storage_path, args.url[0], skip_cert_verify).run()
+        elif parsed_url.path.startswith("/c/") and "/ebook-viewer/" in parsed_url.path:
+            Ebsco2Downloader(storage_path, args.url[0], skip_cert_verify).run()
+        else:
+            raise NotImplementedError('This type of URL is yet not supported')
 
         Log.success('All done. Exiting..')
         ProcessLock.unlock(storage_path)

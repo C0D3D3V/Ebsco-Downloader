@@ -59,6 +59,9 @@ or like this: `https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=yoursessi
 
 or like this: `https://web.p.ebscohost.com/ehost/ebookviewer/ebook/somebookidentifier?sid=yoursessionid@redis&vid=3&lpid=lp_5&format=EB`
 
+or like this: `https://research.ebsco.com/c/user_id/ebook-viewer/pdf/book_id` In this case also export the ebsco cookies.
+
+
 You can download this book now using this command: `ebsco-dl https://web.p.ebscohost.com/ehost/ebookviewer/ebook?sid=yoursessionid%40redis&vid=0&format=EB`. The book will be downloaded in the current working directory, you can change this behavior by using the `--path` option.
 
 If you run into certificate problems you can add `-scv` to the command, so that the certificate is not validated. 

@@ -42,12 +42,6 @@ class Ebsco2Url:
     base_webview: str = field(init=False, default=None)
     on_page_json: Dict = field(init=False, default=None)
 
-    is_old_API: bool = field(init=False, default=False)
-    parsed_iframe_url: ParseResult = field(init=False, default=None)
-    on_iframe_json: Dict = field(init=False, default=None)
-    viewer_token: str = field(init=False, default=None)
-    old_digital_obj: Dict = field(init=False, default=None)
-
     checkout_token: str = field(init=False, default=None)
 
 
@@ -178,15 +172,6 @@ class Ebsco2Downloader:
             else:
                 return default
         return found_match.group(1)
-
-    @staticmethod
-    def replace_equals_with_count(string):
-        match = re.search(r'(=+)$', string)
-        if match:
-            count = len(match.group(1))
-            return string[:-count] + str(count)
-        else:
-            return string + '0'
 
     def load_book_info(self, ebsco_url: Ebsco2Url, session: Session):
         book_info_url = ebsco_url.parsed_url._replace(
@@ -790,8 +775,17 @@ class Ebsco2Downloader:
         # OEBPS/toc.ncx
         authors_display = " and ".join(authors) if len(authors) > 1 else authors[0]
 
-        all_contents = book_info_json.get('contents', {})
-        nav_points = '\n'.join(self.build_nav_points(all_contents.get(entry, {})) for entry in all_contents)
+        all_contents = pages_info_json.get('sections', [])
+        all_artifact_ids = []
+        for content in all_contents:
+            # artifact IDs
+            page_artifact_id = content.get('artifactId')
+            page_artifact_id = page_artifact_id.split('#')[0]
+            if page_artifact_id not in all_artifact_ids and page_artifact_id != 'previewlimit':
+                all_artifact_ids.append(page_artifact_id)
+
+        section_db_path = os.path.commonpath(all_artifact_ids)
+        nav_points = '\n'.join(self.build_nav_points(entry, section_db_path) for entry in all_contents)
 
         toc_tpl = f'''<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="en-US">
     <head>
@@ -813,15 +807,13 @@ class Ebsco2Downloader:
         epub.close()
 
     @staticmethod
-    def build_nav_points(nav_dic) -> str:
+    def build_nav_points(nav_dic, db_path) -> str:
         return f'''
         <navPoint id="{nav_dic.get('id')}">
             <navLabel>
-                <text>{nav_dic.get('title')}</text>
+                <text>{nav_dic.get('name')}</text>
             </navLabel>
-            <content src="{'/'.join(nav_dic.get('artifactId').split('/')[4:])}"/>
+            <content src="{os.path.relpath(os.path.relpath(nav_dic.get('artifactId'), db_path), "OEBPS")}"/>
+            {"\n".join(Ebsco2Downloader.build_nav_points(entry, db_path) for entry in nav_dic.get('children', []) or [])}
         </navPoint>
-        ''' + '\n'.join(
-            Ebsco2Downloader.build_nav_points(nav_dic.get('childContents', {}).get(entry, {}))
-            for entry in nav_dic.get('childContents', {})
-        )
+        '''

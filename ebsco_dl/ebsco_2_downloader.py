@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import json
 import logging
@@ -9,12 +8,11 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from urllib.parse import ParseResult, quote, unquote, urlparse
 
 import aiofiles
 import aiohttp
-import certifi  # pylint: disable=unused-import
 import pypdf
 import urllib3
 from aiohttp.client_exceptions import ClientError, ClientResponseError
@@ -34,7 +32,7 @@ from ebsco_dl.utils import (
 
 
 @dataclass
-class Ebsco2Url:
+class EbscoBookInfo:
     parsed_url: ParseResult
     book_id: str
     user_id: str
@@ -43,6 +41,11 @@ class Ebsco2Url:
     on_page_json: Dict = field(init=False, default=None)
 
     checkout_token: str = field(init=False, default=None)
+
+    book_info_json: Dict = field(init=False, default=None)
+    pages_info_json: Dict = field(init=False, default=None)
+    all_pages_ids: List = field(init=False, default=None)
+    all_clean_pages_ids: List = field(init=False, default=None)
 
 
 class ContentRangeError(ConnectionError):
@@ -83,13 +86,8 @@ class Ebsco2Downloader:
         if os.path.isfile(cookies_path):
             self.cookie_jar.load(ignore_discard=True, ignore_expires=True)
 
-    @staticmethod
-    def prettify_xml(xml_string):
-        return etree.tostring(
-            parse_xml_string(xml_string), pretty_print=True, encoding='utf-8', xml_declaration=True
-        ).decode()
+        self.session = self.create_session()
 
-    def run(self):
         # Parse download URL
         parsed_url = urlparse(self.download_url)
 
@@ -97,55 +95,56 @@ class Ebsco2Downloader:
         if not (parsed_url.path.startswith("/c/") and "/ebook-viewer/" in parsed_url.path):
             raise NotImplementedError('This type of URL is yet not supported')
 
-        # In any case open book URL, to get cookies.
-        session = self.create_session()
-
-        # c/user_id/ebook-viewer/pdf/book_id
         url_path_parts = parsed_url.path.split('/')
-        user_id = url_path_parts[2]
-        book_format = url_path_parts[4]
-        book_id = url_path_parts[5]
-
-        ebsco_url = Ebsco2Url(
+        self.book_info = EbscoBookInfo(
             parsed_url=parsed_url,
-            user_id=user_id,
-            book_format=book_format,
-            book_id=book_id,
+            user_id=url_path_parts[2],
+            book_format=url_path_parts[4],
+            book_id=url_path_parts[5],
         )
 
-        ebsco_url.base_webview = self.get_url_view(self.download_url, session)
-        ebsco_url.on_page_json = json.loads(
+    @staticmethod
+    def prettify_xml(xml_string):
+        return etree.tostring(
+            parse_xml_string(xml_string), pretty_print=True, encoding='utf-8', xml_declaration=True
+        ).decode()
+
+    def run(self):
+        self.book_info.base_webview = self.get_url_view(self.download_url)
+        self.book_info.on_page_json = json.loads(
             self.first_match(
                 r'<script\s*id="__NEXT_DATA__"\s*type="application/json">({.*})\s*</script>',
-                ebsco_url.base_webview,
+                self.book_info.base_webview,
                 'On page json',
             )
         )
 
-        if ebsco_url.book_id != ebsco_url.on_page_json['query']['recordId']:
+        if self.book_info.book_id != self.book_info.on_page_json['query']['recordId']:
             print(
-                f"Warning recordId is not equal: {ebsco_url.book_id} != {ebsco_url.on_page_json['query']['recordId']}"
+                f"Warning recordId is not equal: {self.book_info.book_id} != {self.book_info.on_page_json['query']['recordId']}"
             )
 
-        if ebsco_url.book_format == 'epub':
-            asyncio.run(self.download_epub(ebsco_url, session))
-        elif ebsco_url.book_format == 'pdf':
-            self.download_pdf(ebsco_url, session)
+        self.book_info.book_info_json = self.load_book_info()
+        self.book_info.pages_info_json = self.load_pages_info()
+
+        self.book_info.all_pages_ids, self.book_info.all_clean_pages_ids = self.extract_artifact_ids(
+            self.book_info.pages_info_json.get('pages', [])
+        )
+
+        self.book_info.turn_json = self.load_page_turn()
+        self.book_info.checkout_token = self.book_info.turn_json['checkoutToken']
+
+        if self.book_info.book_format == 'epub':
+            asyncio.run(self.download_epub())
+        elif self.book_info.book_format == 'pdf':
+            self.download_pdf()
         else:
             raise NotImplementedError("This book format is not yet supported")
 
-    def get_url_view(self, url: str, session: Session):
+    def get_url_view(self, url: str):
         Log.info(f'Loading: `{url}`')
 
-        viewer_headers = self.stdHeader.copy()
-
-        response = session.get(
-            url,
-            headers=viewer_headers,
-            verify=not self.skip_cert_verify,
-            allow_redirects=True,
-            timeout=60,
-        )
+        response = self.session_get(url)
 
         if not response.ok:
             raise RuntimeError(f'Your session is broken! {response.reason}')
@@ -154,6 +153,16 @@ class Ebsco2Downloader:
             raise RuntimeError('Your cookies or the session id in the URL are invalid!')
 
         return response.text
+
+    def session_get(self, url):
+        response = self.session.get(
+            url,
+            headers=self.stdHeader.copy(),
+            verify=not self.skip_cert_verify,
+            allow_redirects=True,
+            timeout=60,
+        )
+        return response
 
     def get_cookie_jar(self) -> aiohttp.CookieJar:
         return convert_to_aiohttp_cookie_jar(self.cookie_jar)
@@ -173,43 +182,31 @@ class Ebsco2Downloader:
                 return default
         return found_match.group(1)
 
-    def load_book_info(self, ebsco_url: Ebsco2Url, session: Session):
-        book_info_url = ebsco_url.parsed_url._replace(
-            path=f"/api/books/viewer/v1/c/{ebsco_url.user_id}/record/{ebsco_url.book_id}/format/{ebsco_url.book_format}",
+    def load_book_info(self):
+        book_info_url = self.book_info.parsed_url._replace(
+            path=f"/api/books/viewer/v1/c/{self.book_info.user_id}/record/{self.book_info.book_id}/format/{self.book_info.book_format}",
             query=None,
         ).geturl()
 
         Log.info(f"Loading book info: `{book_info_url}`")
-        book_response = session.get(
-            book_info_url,
-            headers=self.stdHeader,
-            verify=(not self.skip_cert_verify),
-            allow_redirects=True,
-            timeout=60,
-        )
+        book_response = self.session_get(book_info_url)
         return json.loads(book_response.text)
 
-    def load_pages_info(self, ebsco_url: Ebsco2Url, session: Session):
-        pages_info_url = ebsco_url.parsed_url._replace(
-            path=f"/api/books/toc/v1/c/{ebsco_url.user_id}/record/{ebsco_url.book_id}/format/{ebsco_url.book_format}/toc",
+    def load_pages_info(self):
+        pages_info_url = self.book_info.parsed_url._replace(
+            path=f"/api/books/toc/v1/c/{self.book_info.user_id}/record/{self.book_info.book_id}/format/{self.book_info.book_format}/toc",
             query=None,
         ).geturl()
 
         Log.info(f"Loading pages info: `{pages_info_url}`")
-        pages_response = session.get(
-            pages_info_url,
-            headers=self.stdHeader,
-            verify=(not self.skip_cert_verify),
-            allow_redirects=True,
-            timeout=60,
-        )
+        pages_response = self.session_get(pages_info_url)
         return json.loads(pages_response.text)
 
-    def extract_pages(self, pages_info_json: Dict):
-        all_pages = pages_info_json.get('pages', [])
+    @staticmethod
+    def extract_artifact_ids(artifact_list: List):
         all_pages_ids = []
         all_clean_pages_ids = []
-        for page in all_pages:
+        for page in artifact_list:
             # artifact IDs
             page_artifact_id = page.get('artifactId')
             page_artifact_id = page_artifact_id.split('#')[0]
@@ -222,21 +219,21 @@ class Ebsco2Downloader:
                 all_clean_pages_ids.append(page_clean_id)
         return all_pages_ids, all_clean_pages_ids
 
-    def load_turn_info(self, ebsco_url: Ebsco2Url, session: Session, book_info_json: Dict, page_ids: List):
+    def load_page_turn(self):
         turn_data = {
-            "RetrievalDatabase": book_info_json.get("db"),
-            "PageIds": page_ids,
+            "RetrievalDatabase": self.book_info.book_info_json.get("db"),
+            "PageIds": self.book_info.all_clean_pages_ids[:1],
             # "PatronRequestedPageLabel": "265",
         }
-        turn_url = ebsco_url.parsed_url._replace(
-            path=f"/api/books/viewer/v1/book/{book_info_json.get('bookId')}/format/{ebsco_url.book_format}/page-turn",
+        turn_url = self.book_info.parsed_url._replace(
+            path=f"/api/books/viewer/v1/book/{self.book_info.book_info_json.get('bookId')}/format/{self.book_info.book_format}/page-turn",
             query=None,
         ).geturl()
 
         Log.info(f"Loading turn: `{turn_url}`")
         headers = self.stdHeader.copy()
         headers["Content-Type"] = "application/json"
-        turn_response = session.post(
+        turn_response = self.session.post(
             turn_url,
             data=json.dumps(turn_data),
             headers=headers,
@@ -246,25 +243,14 @@ class Ebsco2Downloader:
         )
         return json.loads(turn_response.text)
 
-    def download_pdf(self, ebsco_url: Ebsco2Url, session: Session):
-        # First we retrieve the book info json
-        book_info_json = self.load_book_info(ebsco_url, session)
-        pages_info_json = self.load_pages_info(ebsco_url, session)
-
-        all_pages_ids, all_clean_pages_ids = self.extract_pages(pages_info_json)
-
+    def download_pdf(self):
         # Extract Meta data
-        book_title = book_info_json.get('bookTitle', 'untitled')
-        # authors = book_info_json.get('authors', ['anonymous'])
-        # publicationYear = book_info_json.get('publicationYear', '1970')
-
-        turn_json = self.load_turn_info(ebsco_url, session, book_info_json, all_clean_pages_ids[:1])
-        ebsco_url.checkout_token = turn_json['checkoutToken']
+        book_title = self.book_info.book_info_json.get('bookTitle', 'untitled')
 
         # Start downloading Artifacts
         book_path = PT.path_of_book(self.storage_path, book_title)
         os.makedirs(str(book_path), exist_ok=True)
-        pdf_content_files = asyncio.run(self.batch_download_pdf_parts(all_pages_ids, book_path, ebsco_url))
+        pdf_content_files = asyncio.run(self.batch_download_pdf_parts(self.book_info.all_pages_ids, book_path))
 
         Log.info('Merging pdf artifacts to one pdf')
         merger = pypdf.PdfWriter()
@@ -272,7 +258,7 @@ class Ebsco2Downloader:
             merger.append(pdf_page)
             Log.info(f'Merged artifact {idx}')
 
-        all_contents = pages_info_json.get('sections', [])
+        all_contents = self.book_info.pages_info_json.get('sections', [])
         for entry in all_contents:
             self.build_outline(merger, entry)
 
@@ -291,30 +277,27 @@ class Ebsco2Downloader:
                 Log.debug(f"Failed to check if download can be continued on fail: {err}")
         return False
 
-    async def batch_download_pdf_parts(self, dl_jobs: List[str], book_path: Path, ebsco_url: Ebsco2Url) -> List[Path]:
+    async def batch_download_pdf_parts(self, dl_jobs: List[str], book_path: Path) -> List[Path]:
         """
         @param dl_jobs: List of rel_file_path
         @param is_essential: Applied to all jobs
         """
         semaphore = asyncio.Semaphore(self.max_parallel_dl)
-        dl_results = await asyncio.gather(
-            *[self.download_pdf_part_from_ebsco(dl_job, book_path, ebsco_url, semaphore) for dl_job in dl_jobs]
-        )
+        dl_results = await asyncio.gather(*[self.download_pdf_part(dl_job, book_path, semaphore) for dl_job in dl_jobs])
         for idx, dl_result in enumerate(dl_results):
             if not dl_result[0]:
                 Log.error(f'Error: {dl_jobs[idx]} is essential. Abort! Please try again later!')
                 exit(1)
         return [tup[1] for tup in dl_results]
 
-    async def download_pdf_part_from_ebsco(
+    async def download_pdf_part(
         self,
         page_id: str,
         book_path: Path,
-        ebsco_url: Ebsco2Url,
         semaphore: asyncio.Semaphore,
         conn_timeout: int = 10,
         read_timeout: int = 1800,
-    ) -> (bool, Path):
+    ) -> Tuple[bool, Path]:
         """Returns True if the file was successfully downloaded or exists"""
 
         rel_file_path = page_id.rsplit('/', 1)[1]
@@ -329,7 +312,7 @@ class Ebsco2Downloader:
             PT.make_base_dir(local_path)
             headers = self.stdHeader.copy()
 
-            dl_url = f'{ebsco_url.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe='')}/{ebsco_url.checkout_token}'
+            dl_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe='')}/{self.book_info.checkout_token}'
 
             if self.verbose:
                 Log.info(f'Downloading {rel_file_path} from: {dl_url}')
@@ -337,7 +320,6 @@ class Ebsco2Downloader:
                 Log.info(f'Downloading {rel_file_path}...')
 
             received = 0
-            total = 0
             tries_num = 0
             file_obj = None
             can_continue_on_fail = False
@@ -428,7 +410,7 @@ class Ebsco2Downloader:
             return True, local_path_raw
 
     @staticmethod
-    def build_outline(merger, nav_dic, parent=None) -> str:
+    def build_outline(merger, nav_dic, parent=None):
         new_parent = merger.add_outline_item(
             title=nav_dic.get('name'), page_number=nav_dic.get('startPageIndex'), parent=parent
         )
@@ -441,7 +423,6 @@ class Ebsco2Downloader:
         semaphore: asyncio.Semaphore,
         artifact_url: str,
         artifact_file_path,
-        headers: Dict,
         page_file_path: str,
         conn_timeout: int = 10,
         read_timeout: int = 1800,
@@ -451,7 +432,7 @@ class Ebsco2Downloader:
             cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
         ) as session:
             async with session.request(
-                "GET", artifact_url, headers=headers, raise_for_status=True, ssl=ssl_context
+                "GET", artifact_url, headers=self.stdHeader, raise_for_status=True, ssl=ssl_context
             ) as response:
                 if not response.ok or unquote(str(response.url)) != unquote(artifact_url):
                     raise RuntimeError(f'We got rate limited! {response.reason}')
@@ -464,7 +445,7 @@ class Ebsco2Downloader:
                 Log.info(f'Loaded artifact url: `{artifact_url}`')
                 response_text = await response.text()
 
-                split_xhtml = re.search(r'^(.*<body[^>]*>)(.*)(<\/body[^>]*>.*)$', response_text)
+                split_xhtml = re.search(r'^(.*<body[^>]*>)(.*)(</body[^>]*>.*)$', response_text)
                 xhtml_head, xhtml_body, _xhtml_footer = split_xhtml.groups()
 
                 # Find Header includes
@@ -567,23 +548,13 @@ class Ebsco2Downloader:
         str_xml = str_xml.replace("'", "&apos;")
         return str_xml
 
-    async def download_epub(self, ebsco_url: Ebsco2Url, session: Session):
-        # First we retrieve the book info json
-        book_info_json = self.load_book_info(ebsco_url, session)
-        pages_info_json = self.load_pages_info(ebsco_url, session)
-
-        all_pages_ids, all_clean_pages_ids = self.extract_pages(pages_info_json)
-
+    async def download_epub(self):
         # Extract Meta data
-        book_title = book_info_json.get('bookTitle', 'untitled')
-        authors = book_info_json.get('authors', ['anonymous'])
+        book_title = self.book_info.book_info_json.get('bookTitle', 'untitled')
+        authors = self.book_info.book_info_json.get('authors', ['anonymous'])
         if isinstance(authors, str):
             authors = authors.split(', ')
-        publication_year = book_info_json.get('publicationYear', '1970')
-        language = 'en'
-
-        turn_json = self.load_turn_info(ebsco_url, session, book_info_json, all_clean_pages_ids[:1])
-        ebsco_url.checkout_token = turn_json['checkoutToken']
+        publication_year = self.book_info.book_info_json.get('publicationYear', '1970')
 
         # Start downloading Artifacts
         book_directory = PT.path_of_book(self.storage_path, book_title)
@@ -596,24 +567,21 @@ class Ebsco2Downloader:
         page_tasks = []
         semaphore_pages = asyncio.Semaphore(self.max_parallel_dl)
 
-        headers = self.stdHeader.copy()
+        db_path = os.path.commonpath(self.book_info.all_pages_ids)
 
-        db_path = os.path.commonpath(all_pages_ids)
-
-        for page_id in all_pages_ids:
+        for page_id in self.book_info.all_pages_ids:
             page_file_path = os.path.relpath(page_id, db_path)
             artifact_file_path = book_directory / os.path.relpath(page_id, db_path)
             os.makedirs(str(artifact_file_path.parent), exist_ok=True)
             epub_content_files.append(artifact_file_path)
 
-            artifact_url = f'{ebsco_url.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe='')}/{ebsco_url.checkout_token}'
+            artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe='')}/{self.book_info.checkout_token}'
 
             page_tasks.append(
                 self.download_epub_page(
                     semaphore_pages,
                     artifact_url,
                     artifact_file_path,
-                    headers,
                     page_file_path,
                 )
             )
@@ -627,7 +595,7 @@ class Ebsco2Downloader:
                     all_includes.append(artifact_include)
 
         # Download includes (Images, Stylesheets, Fonts)
-        base_artifact_url = f'{ebsco_url.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/checkout/{ebsco_url.checkout_token}/artifact/{db_path}/'
+        base_artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/checkout/{self.book_info.checkout_token}/artifact/{db_path}/'
 
         while len(all_includes) > 0:
             all_css_includes = []
@@ -750,13 +718,13 @@ class Ebsco2Downloader:
 
         epub_manifest += '<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>'
 
-        epub_uuid = str(uuid.UUID(hashlib.sha256(ebsco_url.book_id.encode()).hexdigest()[:32]))
+        epub_uuid = str(uuid.UUID(hashlib.sha256(self.book_info.book_id.encode()).hexdigest()[:32]))
+        # <dc:language>{self.escape(language)}</dc:language>
         content_tpl = f'''<?xml version='1.0' encoding='UTF-8'?>
 <package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="id">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
     <dc:title>{self.escape(book_title)}</dc:title>
     <dc:date>{self.escape(publication_year)}</dc:date>
-    <dc:language>{self.escape(language)}</dc:language>
     <dc:identifier
         id="id"
         opf:scheme="uuid">{epub_uuid}</dc:identifier>
@@ -775,17 +743,11 @@ class Ebsco2Downloader:
         # OEBPS/toc.ncx
         authors_display = " and ".join(authors) if len(authors) > 1 else authors[0]
 
-        all_contents = pages_info_json.get('sections', [])
-        all_artifact_ids = []
-        for content in all_contents:
-            # artifact IDs
-            page_artifact_id = content.get('artifactId')
-            page_artifact_id = page_artifact_id.split('#')[0]
-            if page_artifact_id not in all_artifact_ids and page_artifact_id != 'previewlimit':
-                all_artifact_ids.append(page_artifact_id)
+        all_sections = self.book_info.pages_info_json.get('sections', [])
+        all_artifact_ids, _ = self.extract_artifact_ids(all_sections)
 
         section_db_path = os.path.commonpath(all_artifact_ids)
-        nav_points = '\n'.join(self.build_nav_points(entry, section_db_path) for entry in all_contents)
+        nav_points = '\n'.join(self.build_nav_points(entry, section_db_path) for entry in all_sections)
 
         toc_tpl = f'''<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="en-US">
     <head>
@@ -805,6 +767,7 @@ class Ebsco2Downloader:
         epub.writestr('OEBPS/toc.ncx', self.prettify_xml(toc_tpl))
 
         epub.close()
+        return None
 
     @staticmethod
     def build_nav_points(nav_dic, db_path) -> str:

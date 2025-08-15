@@ -40,6 +40,7 @@ setup(
         'lxml>=5.1.1',
         'aiohttp>=3.9.3',
         'aiofiles>=23.2.1',
+        'urllib3',
     ],
     classifiers=[
         'Development Status :: 5 - Production/Stable',

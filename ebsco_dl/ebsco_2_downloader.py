@@ -568,7 +568,7 @@ class Ebsco2Downloader:
         page_tasks = []
         semaphore_pages = asyncio.Semaphore(self.max_parallel_dl)
 
-        db_path = os.path.commonpath(self.book_info.all_pages_ids).split("/OEBPS")[0]
+        db_path = os.path.commonpath(self.book_info.all_pages_ids).split("/OEBPS")[0].split("/OPS")[0].split("/EPUB")[0]
 
         for page_id in self.book_info.all_pages_ids:
             page_file_path = os.path.relpath(page_id, db_path)
@@ -761,7 +761,7 @@ class Ebsco2Downloader:
         all_sections = self.book_info.pages_info_json.get('sections', [])
         all_artifact_ids, _ = self.extract_artifact_ids(all_sections)
 
-        section_db_path = os.path.commonpath(all_artifact_ids).split("/OEBPS")[0]
+        section_db_path = os.path.commonpath(all_artifact_ids).split("/OEBPS")[0].split("/OPS")[0].split("/EPUB")[0]
         nav_points = '\n'.join(self.build_nav_points(entry, section_db_path) for entry in all_sections)
 
         toc_tpl = f'''<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="en-US">

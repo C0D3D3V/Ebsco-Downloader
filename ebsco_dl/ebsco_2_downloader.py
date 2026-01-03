@@ -568,11 +568,9 @@ class Ebsco2Downloader:
         page_tasks = []
         semaphore_pages = asyncio.Semaphore(self.max_parallel_dl)
 
-        db_path = os.path.commonpath(self.book_info.all_pages_ids).split("/OEBPS")[0].split("/OPS")[0].split("/EPUB")[0]
-
         for page_id in self.book_info.all_pages_ids:
-            page_file_path = os.path.relpath(page_id, db_path)
-            artifact_file_path = book_directory / os.path.relpath(page_id, db_path)
+            page_file_path = page_id
+            artifact_file_path = book_directory / page_id
             os.makedirs(str(artifact_file_path.parent), exist_ok=True)
             epub_content_files.append(artifact_file_path)
 
@@ -596,7 +594,7 @@ class Ebsco2Downloader:
                     all_includes.append(artifact_include)
 
         # Download includes (Images, Stylesheets, Fonts)
-        base_artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/checkout/{self.book_info.checkout_token}/artifact/{db_path}/'
+        base_artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/checkout/{self.book_info.checkout_token}/artifact/'
 
         while len(all_includes) > 0:
             all_css_includes = []
@@ -759,10 +757,10 @@ class Ebsco2Downloader:
         authors_display = " and ".join(authors) if len(authors) > 1 else authors[0]
 
         all_sections = self.book_info.pages_info_json.get('sections', [])
-        all_artifact_ids, _ = self.extract_artifact_ids(all_sections)
+        for entry in all_sections:
+            self.fix_paths_in_structure(entry)
 
-        section_db_path = os.path.commonpath(all_artifact_ids).split("/OEBPS")[0].split("/OPS")[0].split("/EPUB")[0]
-        nav_points = '\n'.join(self.build_nav_points(entry, section_db_path) for entry in all_sections)
+        nav_points = '\n'.join(self.build_nav_points(entry) for entry in all_sections)
 
         toc_tpl = f'''<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="en-US">
     <head>
@@ -785,13 +783,22 @@ class Ebsco2Downloader:
         return None
 
     @staticmethod
-    def build_nav_points(nav_dic, db_path) -> str:
+    def fix_paths_in_structure(nav_dic) -> str:
+        artifact_id = nav_dic.get('artifactId')
+        split = artifact_id.split('/', 1)
+        nav_dic['artifactId'] = split[0].replace("epub", "EPUB") + "/" + split[1]
+
+        for entry in nav_dic.get('children', []) or []:
+            Ebsco2Downloader.fix_paths_in_structure(entry)
+
+    @staticmethod
+    def build_nav_points(nav_dic) -> str:
         return f'''
         <navPoint id="{nav_dic.get('id')}">
             <navLabel>
                 <text>{nav_dic.get('name')}</text>
             </navLabel>
-            <content src="{os.path.relpath(os.path.relpath(nav_dic.get('artifactId'), db_path), "OEBPS")}"/>
-            {"\n".join(Ebsco2Downloader.build_nav_points(entry, db_path) for entry in nav_dic.get('children', []) or [])}
+            <content src="{os.path.relpath(nav_dic.get('artifactId'), "OEBPS")}"/>
+            {"\n".join(Ebsco2Downloader.build_nav_points(entry) for entry in nav_dic.get('children', []) or [])}
         </navPoint>
         '''

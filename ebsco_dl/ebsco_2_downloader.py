@@ -313,7 +313,7 @@ class Ebsco2Downloader:
             PT.make_base_dir(local_path)
             headers = self.stdHeader.copy()
 
-            dl_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe='')}/{self.book_info.checkout_token}'
+            dl_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe="")}/{self.book_info.checkout_token}'
 
             if self.verbose:
                 Log.info(f'Downloading {rel_file_path} from: {dl_url}')
@@ -574,7 +574,7 @@ class Ebsco2Downloader:
             os.makedirs(str(artifact_file_path.parent), exist_ok=True)
             epub_content_files.append(artifact_file_path)
 
-            artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe='')}/{self.book_info.checkout_token}'
+            artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe="")}/{self.book_info.checkout_token}'
 
             page_tasks.append(
                 self.download_epub_page(
@@ -793,12 +793,15 @@ class Ebsco2Downloader:
 
     @staticmethod
     def build_nav_points(nav_dic) -> str:
+        # Calculate the children string outside the f-string to avoid the backslash error
+        children_xml = "\n".join(Ebsco2Downloader.build_nav_points(entry) for entry in nav_dic.get('children', []) or [])
+        
         return f'''
         <navPoint id="{nav_dic.get('id')}">
             <navLabel>
                 <text>{nav_dic.get('name')}</text>
             </navLabel>
             <content src="{os.path.relpath(nav_dic.get('artifactId'), "OEBPS")}"/>
-            {"\n".join(Ebsco2Downloader.build_nav_points(entry) for entry in nav_dic.get('children', []) or [])}
+            {children_xml}
         </navPoint>
         '''

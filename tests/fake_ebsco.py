@@ -109,9 +109,16 @@ class FakeEbsco:
         asyncio.run_coroutine_threadsafe(self._start_server(), self._loop).result()
 
     def stop(self):
-        asyncio.run_coroutine_threadsafe(self._runner.cleanup(), self._loop).result()
+        asyncio.run_coroutine_threadsafe(self._stop_server(), self._loop).result()
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
+
+    async def _stop_server(self):
+        await self._runner.cleanup()
+        handlers_still_running = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        for task in handlers_still_running:
+            task.cancel()
+        await asyncio.gather(*handlers_still_running, return_exceptions=True)
 
     async def _start_server(self):
         app = web.Application()

@@ -462,6 +462,11 @@ class Ebsco2Downloader:
         return await fetch_once()
 
     @staticmethod
+    def resolve_epub_path(referencing_file: str, reference: str) -> str:
+        """EPUB paths always use forward slashes, also on Windows, because they end up in URLs and the EPUB."""
+        return posixpath.normpath(posixpath.join(posixpath.dirname(referencing_file), reference))
+
+    @staticmethod
     def is_ebsco_error_page(response_text: str) -> bool:
         return response_text.startswith('<script type="text/javascript">') and 'pageError' in response_text
 
@@ -513,13 +518,7 @@ class Ebsco2Downloader:
         for artifact_include in artifact_includes:
             # Ignore URLs, only download relative and absolute paths
             if urlparse(artifact_include).scheme == '':
-                try:
-                    own_directory = os.path.dirname(page_file_path)
-                    correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
-                except BaseException:
-                    correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
-
-                result_artifact_includes.append(correct_path)
+                result_artifact_includes.append(self.resolve_epub_path(page_file_path, artifact_include))
             else:
                 logging.warning('Skipping external include: %s', artifact_include)
 
@@ -572,12 +571,7 @@ class Ebsco2Downloader:
                         logging.warning('Skipping external include: %s', real_artifact_include)
                     continue
 
-                try:
-                    own_directory = os.path.dirname(artifact_url_path)
-                    correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
-                except BaseException:
-                    correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
-
+                correct_path = self.resolve_epub_path(artifact_url_path, artifact_include)
                 if correct_path not in all_css_includes:
                     all_css_includes.append(correct_path)
 
@@ -687,7 +681,6 @@ class Ebsco2Downloader:
         # Compose E-Pub
         epub_path = str(book_directory) + '.epub'
         epub = zipfile.ZipFile(epub_path, 'w', zipfile.ZIP_DEFLATED)
-        book_path_oebps = book_directory / 'OEBPS'
 
         # Mimetype
         epub.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
@@ -712,8 +705,8 @@ class Ebsco2Downloader:
 
         # build spine and add all normal xhtml files to manifest
         for idx, epub_content_file in enumerate(epub_content_files):
-            relative_oebps_path = Path(os.path.relpath(epub_content_file, book_path_oebps)).as_posix()
-            relative_path = Path(os.path.relpath(epub_content_file, book_directory)).as_posix()
+            relative_path = epub_content_file.relative_to(book_directory).as_posix()
+            relative_oebps_path = posixpath.relpath(relative_path, 'OEBPS')
 
             epub_manifest += (
                 f'<item id="html{idx + 1}" href="{relative_oebps_path}" media-type="application/xhtml+xml"/>\n'
@@ -745,8 +738,8 @@ class Ebsco2Downloader:
             if not epub_include_file.is_file():
                 Log.warning(f'Leaving out {epub_include_file}, it could not be downloaded')
                 continue
-            relative_oebps_path = Path(os.path.relpath(epub_include_file, book_path_oebps)).as_posix()
-            relative_path = Path(os.path.relpath(epub_include_file, book_directory)).as_posix()
+            relative_path = epub_include_file.relative_to(book_directory).as_posix()
+            relative_oebps_path = posixpath.relpath(relative_path, 'OEBPS')
 
             file_ext = str(epub_include_file).rsplit('.', maxsplit=1)[-1].lower()
             if file_ext not in mimetype_dict:
@@ -851,7 +844,7 @@ class Ebsco2Downloader:
             <navLabel>
                 <text>{nav_dic.get('name')}</text>
             </navLabel>
-            <content src="{os.path.relpath(nav_dic.get('artifactId'), "OEBPS")}"/>
+            <content src="{posixpath.relpath(nav_dic.get('artifactId'), "OEBPS")}"/>
             {children_xml}
         </navPoint>
         '''

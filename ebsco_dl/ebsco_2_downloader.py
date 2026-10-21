@@ -793,9 +793,8 @@ class Ebsco2Downloader:
 
     @staticmethod
     def build_nav_points(nav_dic) -> str:
-        # Calculate the children string outside the f-string to avoid the backslash error
         children_xml = "\n".join(Ebsco2Downloader.build_nav_points(entry) for entry in nav_dic.get('children', []) or [])
-        
+
         return f'''
         <navPoint id="{nav_dic.get('id')}">
             <navLabel>

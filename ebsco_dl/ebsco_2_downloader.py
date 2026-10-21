@@ -5,6 +5,7 @@ import logging
 import os
 import posixpath
 import re
+import sys
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ class EbscoBookInfo:
     base_webview: str = field(init=False, default=None)
     on_page_json: Dict = field(init=False, default=None)
 
+    turn_json: Dict = field(init=False, default=None)
     checkout_token: str = field(init=False, default=None)
 
     book_info_json: Dict = field(init=False, default=None)
@@ -51,6 +53,27 @@ class EbscoBookInfo:
 
 class ContentRangeError(ConnectionError):
     pass
+
+
+@dataclass
+class FetchedArtifact:
+    status: int
+    reason: str
+    url: str
+    content_type: str
+    encoding: str
+    body: bytes
+
+    @property
+    def ok(self) -> bool:
+        return self.status < 400
+
+    def text(self) -> str:
+        return self.body.decode(self.encoding, errors='replace')
+
+
+RETRYABLE_ERRORS = (ClientError, asyncio.TimeoutError, OSError, ValueError)
+RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
 
 class Ebsco2Downloader:
@@ -72,6 +95,7 @@ class Ebsco2Downloader:
         self.skip_cert_verify = skip_cert_verify
         self.max_dl_retries = 10
         self.max_parallel_dl = 10
+        self.client_timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
         self.verbose = check_verbose()
 
         logging.getLogger("requests").setLevel(logging.WARNING)
@@ -86,6 +110,8 @@ class Ebsco2Downloader:
         self.cookie_jar = SimpleCookieJar(cookies_path)
         if os.path.isfile(cookies_path):
             self.cookie_jar.load(ignore_discard=True, ignore_expires=True)
+        else:
+            Log.warning(f'No cookies file found at {os.path.abspath(cookies_path)}, continuing without cookies')
 
         self.session = self.create_session()
 
@@ -121,8 +147,8 @@ class Ebsco2Downloader:
         )
 
         if self.book_info.book_id != self.book_info.on_page_json['query']['recordId']:
-            print(
-                f"Warning recordId is not equal: {self.book_info.book_id} != {self.book_info.on_page_json['query']['recordId']}"
+            Log.warning(
+                f"recordId is not equal: {self.book_info.book_id} != {self.book_info.on_page_json['query']['recordId']}"
             )
 
         self.book_info.book_info_json = self.load_book_info()
@@ -133,7 +159,11 @@ class Ebsco2Downloader:
         )
 
         self.book_info.turn_json = self.load_page_turn()
-        self.book_info.checkout_token = self.book_info.turn_json['checkoutToken']
+        self.book_info.checkout_token = self.book_info.turn_json.get('checkoutToken')
+        if not self.book_info.checkout_token:
+            raise RuntimeError(
+                f'EBSCO did not hand out a checkout token for this book: {json.dumps(self.book_info.turn_json)[:300]}'
+            )
 
         if self.book_info.book_format == 'epub':
             asyncio.run(self.download_epub())
@@ -150,8 +180,12 @@ class Ebsco2Downloader:
         if not response.ok:
             raise RuntimeError(f'Your session is broken! {response.reason}')
 
-        if not urlparse(response.url).path.startswith(urlparse(url).path):
-            raise RuntimeError('Your cookies or the session id in the URL are invalid!')
+        redirected_url = urlparse(response.url)
+        if not redirected_url.path.startswith(urlparse(url).path):
+            raise RuntimeError(
+                'Your cookies or the session id in the URL are invalid!'
+                f' You were redirected to: {redirected_url.netloc}{redirected_url.path}'
+            )
 
         return response.text
 
@@ -167,6 +201,30 @@ class Ebsco2Downloader:
 
     def get_cookie_jar(self) -> aiohttp.CookieJar:
         return convert_to_aiohttp_cookie_jar(self.cookie_jar)
+
+    def create_client_session(self) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(cookie_jar=self.get_cookie_jar(), timeout=self.client_timeout)
+
+    @staticmethod
+    def retry_delay_seconds(try_num: int) -> int:
+        return min(2**try_num, 30)
+
+    @staticmethod
+    def describe_error(err: BaseException) -> str:
+        if isinstance(err, ClientResponseError):
+            return f'{err.status} {err.message}'
+        return str(err) or type(err).__name__
+
+    @staticmethod
+    def parse_json_response(response, name: str) -> Dict:
+        if not response.ok:
+            raise RuntimeError(f'Could not load {name}: {response.status_code} {response.reason}')
+        try:
+            return json.loads(response.text)
+        except ValueError as err:
+            raise RuntimeError(
+                f'Could not load {name}, EBSCO answered with {response.headers.get("Content-Type")} instead of JSON'
+            ) from err
 
     def create_session(self) -> Session:
         session = SslHelper.custom_requests_session(self.skip_cert_verify, True, True)
@@ -191,7 +249,7 @@ class Ebsco2Downloader:
 
         Log.info(f"Loading book info: `{book_info_url}`")
         book_response = self.session_get(book_info_url)
-        return json.loads(book_response.text)
+        return self.parse_json_response(book_response, 'book info')
 
     def load_pages_info(self):
         pages_info_url = self.book_info.parsed_url._replace(
@@ -201,7 +259,7 @@ class Ebsco2Downloader:
 
         Log.info(f"Loading pages info: `{pages_info_url}`")
         pages_response = self.session_get(pages_info_url)
-        return json.loads(pages_response.text)
+        return self.parse_json_response(pages_response, 'pages info')
 
     @staticmethod
     def extract_artifact_ids(artifact_list: List):
@@ -242,7 +300,7 @@ class Ebsco2Downloader:
             allow_redirects=True,
             timeout=60,
         )
-        return json.loads(turn_response.text)
+        return self.parse_json_response(turn_response, 'page turn')
 
     def download_pdf(self):
         # Extract Meta data
@@ -271,34 +329,25 @@ class Ebsco2Downloader:
         try:
             headers = old_headers.copy()
             headers['Range'] = 'bytes=0-4'
-            resp = await session.request("GET", url, headers=headers, ssl=ssl_context)
-            return resp.headers.get('Content-Range') is not None and resp.status == 206
+            async with session.get(url, headers=headers, ssl=ssl_context) as resp:
+                return resp.headers.get('Content-Range') is not None and resp.status == 206
         except Exception as err:
             if self.verbose:
                 Log.debug(f"Failed to check if download can be continued on fail: {err}")
         return False
 
-    async def batch_download_pdf_parts(self, dl_jobs: List[str], book_path: Path) -> List[Path]:
-        """
-        @param dl_jobs: List of rel_file_path
-        @param is_essential: Applied to all jobs
-        """
+    async def batch_download_pdf_parts(self, page_ids: List[str], book_path: Path) -> List[Path]:
         semaphore = asyncio.Semaphore(self.max_parallel_dl)
-        dl_results = await asyncio.gather(*[self.download_pdf_part(dl_job, book_path, semaphore) for dl_job in dl_jobs])
-        for idx, dl_result in enumerate(dl_results):
-            if not dl_result[0]:
-                Log.error(f'Error: {dl_jobs[idx]} is essential. Abort! Please try again later!')
-                exit(1)
-        return [tup[1] for tup in dl_results]
+        dl_results = await asyncio.gather(
+            *[self.download_pdf_part(page_id, book_path, semaphore) for page_id in page_ids]
+        )
+        failed_page_ids = [page_id for page_id, dl_result in zip(page_ids, dl_results) if not dl_result[0]]
+        if failed_page_ids:
+            Log.error(f'Could not download {", ".join(failed_page_ids)}. Abort! Please try again later!')
+            sys.exit(1)
+        return [dl_result[1] for dl_result in dl_results]
 
-    async def download_pdf_part(
-        self,
-        page_id: str,
-        book_path: Path,
-        semaphore: asyncio.Semaphore,
-        conn_timeout: int = 10,
-        read_timeout: int = 1800,
-    ) -> Tuple[bool, Path]:
+    async def download_pdf_part(self, page_id: str, book_path: Path, semaphore: asyncio.Semaphore) -> Tuple[bool, Path]:
         """Returns True if the file was successfully downloaded or exists"""
 
         rel_file_path = page_id.rsplit('/', 1)[1]
@@ -306,109 +355,91 @@ class Ebsco2Downloader:
         local_path = str(local_path_raw)
 
         if os.path.exists(local_path):
-            # Warning: We do not check if the file is complete
             Log.info(f'{rel_file_path} is already present')
             return True, local_path_raw
-        else:
-            PT.make_base_dir(local_path)
-            headers = self.stdHeader.copy()
 
-            dl_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe="")}/{self.book_info.checkout_token}'
+        PT.make_base_dir(local_path)
+        # Only complete downloads get the final name, so an aborted run never leaves a broken part behind.
+        part_path = local_path + '.part'
+        headers = self.stdHeader.copy()
 
+        dl_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe="")}/{self.book_info.checkout_token}'
+
+        received = 0
+        file_obj = None
+        can_continue_on_fail = False
+        finished_successfully = False
+        ssl_context = SslHelper.get_ssl_context(self.skip_cert_verify, True, True)
+        async with semaphore, self.create_client_session() as session:
             if self.verbose:
                 Log.info(f'Downloading {rel_file_path} from: {dl_url}')
             else:
                 Log.info(f'Downloading {rel_file_path}...')
 
-            received = 0
-            tries_num = 0
-            file_obj = None
-            can_continue_on_fail = False
-            finished_successfully = False
-            ssl_context = SslHelper.get_ssl_context(self.skip_cert_verify, True, True)
-            async with semaphore, aiohttp.ClientSession(
-                cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
-            ) as session:
-                while tries_num < self.max_dl_retries:
-                    try:
-                        if tries_num > 0 and can_continue_on_fail:
-                            headers["Range"] = f"bytes={received}-"
-                        elif not can_continue_on_fail and 'Range' in headers:
-                            del headers['Range']
-                        async with session.request(
-                            "GET", dl_url, headers=headers, raise_for_status=True, ssl=ssl_context
-                        ) as resp:
-                            # Download the file.
-                            total = int(resp.headers.get("Content-Length", 0))
-                            content_range = resp.headers.get("Content-Range", "")  # Example: bytes 200-1000/67589
+            for try_num in range(1, self.max_dl_retries + 1):
+                try:
+                    if try_num > 1 and can_continue_on_fail:
+                        headers["Range"] = f"bytes={received}-"
+                    else:
+                        headers.pop('Range', None)
+                    async with session.get(dl_url, headers=headers, raise_for_status=True, ssl=ssl_context) as resp:
+                        total = int(resp.headers.get("Content-Length", 0))
+                        content_range = resp.headers.get("Content-Range", "")  # Example: bytes 200-1000/67589
 
-                            if resp.status not in [200, 206]:
-                                if self.verbose:
-                                    Log.debug(f"Warning {rel_file_path} got status {resp.status}")
-
-                            if tries_num > 0 and can_continue_on_fail and not content_range and resp.status != 206:
-                                raise ContentRangeError(
-                                    f"Server did not response for {rel_file_path} with requested range data"
-                                )
-                            file_obj = file_obj or await aiofiles.open(local_path, "wb")
+                        if try_num > 1 and can_continue_on_fail and not content_range and resp.status != 206:
+                            raise ContentRangeError(
+                                f"Server did not response for {rel_file_path} with requested range data"
+                            )
+                        file_obj = file_obj or await aiofiles.open(part_path, "wb")
+                        chunk = await resp.content.read(1024 * 10)
+                        chunk_idx = 0
+                        while chunk:
+                            received += len(chunk)
+                            if chunk_idx % 100 == 0:
+                                Log.info(f"{rel_file_path} got {format_bytes(received)} / {format_bytes(total)}")
+                            await file_obj.write(chunk)
                             chunk = await resp.content.read(1024 * 10)
-                            chunk_idx = 0
-                            while chunk:
-                                received += len(chunk)
-                                if chunk_idx % 100 == 0:
-                                    Log.info(f"{rel_file_path} got {format_bytes(received)} / {format_bytes(total)}")
-                                await file_obj.write(chunk)
-                                chunk = await resp.content.read(1024 * 10)
-                                chunk_idx += 1
+                            chunk_idx += 1
 
-                        if self.verbose:
-                            Log.success(f'Downloaded {rel_file_path} to: {local_path}')
-                        else:
-                            Log.success(f'Successfully downloaded {rel_file_path}')
+                    finished_successfully = True
+                    break
 
-                        finished_successfully = True
+                except RETRYABLE_ERRORS as err:
+                    if isinstance(err, ClientResponseError) and err.status not in RETRYABLE_STATUS_CODES:
+                        Log.error(f'{rel_file_path} could not be downloaded: {err.status} {err.message}')
                         break
 
-                    except (ClientError, OSError, ValueError, ContentRangeError) as err:
-                        if tries_num == 0:
-                            can_continue_on_fail = await self.get_can_continue_on_fail(
-                                dl_url, session, headers, ssl_context
-                            )
-                        if (not can_continue_on_fail and received > 0) or isinstance(err, ContentRangeError):
-                            can_continue_on_fail = False
-                            # Clean up failed file because we can not recover
-                            if file_obj is not None:
-                                await file_obj.close()
-                                file_obj = None
-                            if os.path.exists(local_path):
-                                os.unlink(local_path)
-                            received = 0
+                    Log.warning(
+                        f'(Try {try_num} of {self.max_dl_retries})'
+                        f' Unable to download {rel_file_path}: {self.describe_error(err)}'
+                    )
+                    if try_num == 1:
+                        can_continue_on_fail = await self.get_can_continue_on_fail(
+                            dl_url, session, headers, ssl_context
+                        )
+                    if (not can_continue_on_fail and received > 0) or isinstance(err, ContentRangeError):
+                        can_continue_on_fail = False
+                        if file_obj is not None:
+                            await file_obj.close()
+                            file_obj = None
+                        received = 0
 
-                        if isinstance(err, ClientResponseError):
-                            if err.status in [408, 409, 429]:  # pylint: disable=no-member
-                                # 408 (timeout) or 409 (conflict) and 429 (too many requests)
-                                # Retry after 1 sec
-                                await asyncio.sleep(1)
-                            else:
-                                Log.info(f'{rel_file_path} could not be downloaded: {err.status} {err.message}')
-                                if self.verbose:
-                                    Log.info(f'Error: {str(err)}')
-                                break
+                    if try_num < self.max_dl_retries:
+                        await asyncio.sleep(self.retry_delay_seconds(try_num))
 
-                        if self.verbose:
-                            Log.warning(
-                                f'(Try {tries_num} of {self.max_dl_retries})'
-                                + f' Unable to download "{rel_file_path}": {str(err)}'
-                            )
-                        tries_num += 1
+        if file_obj is not None:
+            await file_obj.close()
+        if not finished_successfully:
+            if os.path.exists(part_path):
+                os.unlink(part_path)
+            return False, local_path_raw
 
-            if file_obj is not None:
-                await file_obj.close()
-            if not finished_successfully:
-                if os.path.exists(local_path):
-                    os.unlink(local_path)
-                return False, local_path_raw
-            return True, local_path_raw
+        os.replace(part_path, local_path)
+        if self.verbose:
+            Log.success(f'Downloaded {rel_file_path} to: {local_path}')
+        else:
+            Log.success(f'Successfully downloaded {rel_file_path}')
+        return True, local_path_raw
 
     @staticmethod
     def build_outline(merger, nav_dic, parent=None):
@@ -419,64 +450,97 @@ class Ebsco2Downloader:
         for entry in child_contents:
             Ebsco2Downloader.build_outline(merger, entry, new_parent)
 
+    async def fetch_artifact(self, session: aiohttp.ClientSession, url: str) -> FetchedArtifact:
+        ssl_context = SslHelper.get_ssl_context(self.skip_cert_verify, True, True)
+
+        async def fetch_once() -> FetchedArtifact:
+            async with session.get(url, headers=self.stdHeader, ssl=ssl_context) as response:
+                body = await response.read()
+                return FetchedArtifact(
+                    status=response.status,
+                    reason=response.reason,
+                    url=str(response.url),
+                    content_type=response.content_type,
+                    encoding=response.get_encoding(),
+                    body=body,
+                )
+
+        for try_num in range(1, self.max_dl_retries):
+            try:
+                response = await fetch_once()
+                if response.status not in RETRYABLE_STATUS_CODES:
+                    return response
+                problem = f'{response.status} {response.reason}'
+            except RETRYABLE_ERRORS as err:
+                problem = self.describe_error(err)
+
+            Log.warning(f'(Try {try_num} of {self.max_dl_retries}) Unable to load {url}: {problem}')
+            await asyncio.sleep(self.retry_delay_seconds(try_num))
+
+        return await fetch_once()
+
+    @staticmethod
+    def is_ebsco_error_page(response_text: str) -> bool:
+        return response_text.startswith('<script type="text/javascript">') and 'pageError' in response_text
+
     async def download_epub_page(
         self,
         semaphore: asyncio.Semaphore,
         artifact_url: str,
         artifact_file_path,
         page_file_path: str,
-        conn_timeout: int = 10,
-        read_timeout: int = 1800,
     ):
-        ssl_context = SslHelper.get_ssl_context(self.skip_cert_verify, True, True)
-        async with semaphore, aiohttp.ClientSession(
-            cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
-        ) as session:
-            async with session.request(
-                "GET", artifact_url, headers=self.stdHeader, raise_for_status=True, ssl=ssl_context
-            ) as response:
-                if not response.ok or unquote(str(response.url)) != unquote(artifact_url):
-                    raise RuntimeError(f'We got rate limited! {response.reason}')
+        async with semaphore, self.create_client_session() as session:
+            response = await self.fetch_artifact(session, artifact_url)
 
-                if response.content_type == 'text/html':
-                    response_text = await response.text()
-                    if response_text.startswith('<script type="text/javascript">') and 'pageError' in response_text:
-                        raise RuntimeError(f'Could not download {artifact_url}, epub is broken.')
+        if not response.ok:
+            raise RuntimeError(f'Could not download {page_file_path}: {response.status} {response.reason}')
+        if unquote(response.url) != unquote(artifact_url):
+            raise RuntimeError(f'We got rate limited! {response.reason}')
 
-                Log.info(f'Loaded artifact url: `{artifact_url}`')
-                response_text = await response.text()
+        response_text = response.text()
+        if response.content_type == 'text/html' and self.is_ebsco_error_page(response_text):
+            raise RuntimeError(f'Could not download {artifact_url}, epub is broken.')
 
-                split_xhtml = re.search(r'^(.*<body[^>]*>)(.*)(</body[^>]*>.*)$', response_text)
-                xhtml_head, xhtml_body, _xhtml_footer = split_xhtml.groups()
+        Log.info(f'Loaded artifact url: `{artifact_url}`')
 
-                # Find Header includes
-                artifact_includes = re.findall(r'src\s*=\s*"([^"]+)"', xhtml_head)
-                artifact_includes += re.findall(r'href\s*=\s*"([^"]+)"', xhtml_head)
-                # Find Body includes
-                artifact_includes += re.findall(r'src\s*=\s*"([^"]+)"', xhtml_body)
-                artifact_includes += re.findall(r'<image[^>]+href\s*=\s*"([^"]+)"', xhtml_body)
+        split_xhtml = re.search(
+            r'^(.*?<body[^>]*>)(.*)(</body[^>]*>.*)$', response_text, flags=re.DOTALL | re.IGNORECASE
+        )
+        if split_xhtml is None:
+            raise RuntimeError(
+                f'Could not find the <body> of {page_file_path}, EBSCO sent {response.content_type} instead of XHTML'
+            )
+        xhtml_head, xhtml_body, _xhtml_footer = split_xhtml.groups()
 
-                async with aiofiles.open(artifact_file_path, 'w', encoding='utf-8') as fs:
-                    await fs.write(response_text)
+        # Find Header includes
+        artifact_includes = re.findall(r'src\s*=\s*"([^"]+)"', xhtml_head)
+        artifact_includes += re.findall(r'href\s*=\s*"([^"]+)"', xhtml_head)
+        # Find Body includes
+        artifact_includes += re.findall(r'src\s*=\s*"([^"]+)"', xhtml_body)
+        artifact_includes += re.findall(r'<image[^>]+href\s*=\s*"([^"]+)"', xhtml_body)
 
-                Log.info(f'Written artifact: `{str(artifact_file_path)}`')
+        async with aiofiles.open(artifact_file_path, 'w', encoding='utf-8') as fs:
+            await fs.write(response_text)
 
-                result_artifact_includes = []
-                # fix artifact_includes paths
-                for artifact_include in artifact_includes:
-                    # Ignore URLs, only download relative and absolute paths
-                    if urlparse(artifact_include).scheme == '':
-                        try:
-                            own_directory = os.path.dirname(page_file_path)
-                            correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
-                        except BaseException:
-                            correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
+        Log.info(f'Written artifact: `{str(artifact_file_path)}`')
 
-                        result_artifact_includes.append(correct_path)
-                    else:
-                        logging.warning('Skipping external include: %s', artifact_include)
+        result_artifact_includes = []
+        # fix artifact_includes paths
+        for artifact_include in artifact_includes:
+            # Ignore URLs, only download relative and absolute paths
+            if urlparse(artifact_include).scheme == '':
+                try:
+                    own_directory = os.path.dirname(page_file_path)
+                    correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
+                except BaseException:
+                    correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
 
-                return result_artifact_includes
+                result_artifact_includes.append(correct_path)
+            else:
+                logging.warning('Skipping external include: %s', artifact_include)
+
+        return result_artifact_includes
 
     async def download_epub_include(
         self,
@@ -486,59 +550,56 @@ class Ebsco2Downloader:
         artifact_file_path,
         all_css_includes: List[str],
         skipped_includes: List[str],
-        conn_timeout: int = 10,
-        read_timeout: int = 1800,
     ):
-        ssl_context = SslHelper.get_ssl_context(self.skip_cert_verify, True, True)
-        async with semaphore, aiohttp.ClientSession(
-            cookie_jar=self.get_cookie_jar(), conn_timeout=conn_timeout, read_timeout=read_timeout
-        ) as session:
-            async with session.request(
-                "GET", artifact_url, headers=self.stdHeader, raise_for_status=False, ssl=ssl_context
-            ) as response:
-                if not response.ok:
-                    if artifact_url not in skipped_includes:
-                        logging.error('Could not download %s, epub could be broken.', artifact_url)
-                        skipped_includes.append(artifact_url)
-                    return
-                if unquote(str(response.url)) != unquote(artifact_url):
-                    raise RuntimeError(f'We got rate limited! {response.reason}')
+        async with semaphore, self.create_client_session() as session:
+            try:
+                response = await self.fetch_artifact(session, artifact_url)
+            except RETRYABLE_ERRORS as err:
+                logging.error('Could not download %s, epub could be broken: %s', artifact_url, self.describe_error(err))
+                skipped_includes.append(artifact_url)
+                return
 
-                Log.info(f'Loaded artifact url: `{artifact_url}`')
+        if not response.ok:
+            if artifact_url not in skipped_includes:
+                logging.error('Could not download %s, epub could be broken.', artifact_url)
+                skipped_includes.append(artifact_url)
+            return
+        if unquote(response.url) != unquote(artifact_url):
+            raise RuntimeError(f'We got rate limited! {response.reason}')
 
-                if response.content_type == 'text/html':
-                    response_text = await response.text()
-                    if response_text.startswith('<script type="text/javascript">') and 'pageError' in response_text:
-                        if artifact_url not in skipped_includes:
-                            logging.error('Could not download %s, epub could be broken.', artifact_url)
-                            skipped_includes.append(artifact_url)
-                        return
+        Log.info(f'Loaded artifact url: `{artifact_url}`')
 
-                if artifact_url.lower().endswith('.css'):
-                    response_text = await response.text()
-                    artifact_includes = re.findall(r'url\s*\(["\']?([^"\')]+)["\']?\)', response_text)
-                    for artifact_include in artifact_includes:
-                        real_artifact_include = artifact_include
+        if response.content_type == 'text/html' and self.is_ebsco_error_page(response.text()):
+            if artifact_url not in skipped_includes:
+                logging.error('Could not download %s, epub could be broken.', artifact_url)
+                skipped_includes.append(artifact_url)
+            return
 
-                        if artifact_include.startswith(('http:', 'https:')):
-                            # skip external includes
-                            if artifact_include not in skipped_includes:
-                                skipped_includes.append(artifact_include)
-                                logging.warning('Skipping external include: %s', real_artifact_include)
-                            continue
+        if artifact_url.lower().endswith('.css'):
+            response_text = response.text()
+            artifact_includes = re.findall(r'url\s*\(["\']?([^"\')]+)["\']?\)', response_text)
+            for artifact_include in artifact_includes:
+                real_artifact_include = artifact_include
 
-                        try:
-                            own_directory = os.path.dirname(artifact_url_path)
-                            correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
-                        except BaseException:
-                            correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
+                if artifact_include.startswith(('http:', 'https:')):
+                    # skip external includes
+                    if artifact_include not in skipped_includes:
+                        skipped_includes.append(artifact_include)
+                        logging.warning('Skipping external include: %s', real_artifact_include)
+                    continue
 
-                        if correct_path not in all_css_includes:
-                            all_css_includes.append(correct_path)
+                try:
+                    own_directory = os.path.dirname(artifact_url_path)
+                    correct_path = os.path.normpath(os.path.join(own_directory, artifact_include))
+                except BaseException:
+                    correct_path = re.sub(r'^(\.\./)+', '', artifact_include)
 
-                async with aiofiles.open(artifact_file_path, 'wb') as fs:
-                    await fs.write(await response.read())
-                Log.info(f'Written artifact: `{str(artifact_file_path)}`')
+                if correct_path not in all_css_includes:
+                    all_css_includes.append(correct_path)
+
+        async with aiofiles.open(artifact_file_path, 'wb') as fs:
+            await fs.write(response.body)
+        Log.info(f'Written artifact: `{str(artifact_file_path)}`')
 
     @staticmethod
     def escape(str_xml: str):
@@ -596,7 +657,9 @@ class Ebsco2Downloader:
         # Download includes (Images, Stylesheets, Fonts)
         base_artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/checkout/{self.book_info.checkout_token}/artifact/'
 
+        requested_includes = set()
         while len(all_includes) > 0:
+            requested_includes.update(all_includes)
             all_css_includes = []
             include_tasks = []
             semaphore_includes = asyncio.Semaphore(self.max_parallel_dl)
@@ -633,9 +696,7 @@ class Ebsco2Downloader:
                 )
 
             await asyncio.gather(*include_tasks)
-            all_includes = all_css_includes
-
-        # session.cookies.save(ignore_discard=True, ignore_expires=True)
+            all_includes = [include for include in all_css_includes if include not in requested_includes]
 
         # Compose E-Pub
         epub_path = str(book_directory) + '.epub'
@@ -695,14 +756,16 @@ class Ebsco2Downloader:
         fonts_counter = 0
         html_counter = len(epub_content_files)
         for epub_include_file in epub_include_files:
+            if not epub_include_file.is_file():
+                Log.warning(f'Leaving out {epub_include_file}, it could not be downloaded')
+                continue
             relative_oebps_path = Path(os.path.relpath(epub_include_file, book_path_oebps)).as_posix()
             relative_path = Path(os.path.relpath(epub_include_file, book_directory)).as_posix()
 
             file_ext = str(epub_include_file).rsplit('.', maxsplit=1)[-1].lower()
             if file_ext not in mimetype_dict:
-                Log.error(f'Error: {file_ext} was not found in mimetype_dict')
-                return False
-            media_type = mimetype_dict[file_ext]
+                Log.warning(f'Unknown file type {file_ext} of {epub_include_file}, adding it as binary data')
+            media_type = mimetype_dict.get(file_ext, 'application/octet-stream')
             idx = 0
             file_type = 'unknown'
             if file_ext in ['css', 'xpgt']:
@@ -717,7 +780,7 @@ class Ebsco2Downloader:
                 file_type = 'html'
                 html_counter += 1
                 idx = html_counter
-                print('Warning! Found unexpected HTML!')
+                Log.warning(f'Found unexpected HTML include {epub_include_file}')
             elif file_ext in ['otf', 'ttf', 'woff', 'woff2']:
                 file_type = 'fonts'
                 fonts_counter += 1
@@ -793,7 +856,9 @@ class Ebsco2Downloader:
 
     @staticmethod
     def build_nav_points(nav_dic) -> str:
-        children_xml = "\n".join(Ebsco2Downloader.build_nav_points(entry) for entry in nav_dic.get('children', []) or [])
+        children_xml = "\n".join(
+            Ebsco2Downloader.build_nav_points(entry) for entry in nav_dic.get('children', []) or []
+        )
 
         return f'''
         <navPoint id="{nav_dic.get('id')}">

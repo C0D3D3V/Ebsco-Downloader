@@ -91,6 +91,8 @@ class EbscoDownloader:
         self.cookie_jar = SimpleCookieJar(cookies_path)
         if os.path.isfile(cookies_path):
             self.cookie_jar.load(ignore_discard=True, ignore_expires=True)
+        else:
+            Log.warning(f'No cookies file found at {os.path.abspath(cookies_path)}, continuing without cookies')
 
     @staticmethod
     def prettify_xml(xml_string):
@@ -212,8 +214,12 @@ class EbscoDownloader:
         if not response.ok:
             raise RuntimeError(f'Your session is broken! {response.reason}')
 
-        if not urlparse(response.url).path.startswith(urlparse(url).path):
-            raise RuntimeError('Your cookies or the session id in the URL are invalid!')
+        redirected_url = urlparse(response.url)
+        if not redirected_url.path.startswith(urlparse(url).path):
+            raise RuntimeError(
+                'Your cookies or the session id in the URL are invalid!'
+                f' You were redirected to: {redirected_url.netloc}{redirected_url.path}'
+            )
 
         return response.text
 

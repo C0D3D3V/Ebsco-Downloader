@@ -4,3 +4,6 @@ include_trailing_comma = true
 force_grid_wrap = 0
 line_length = 120
 profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

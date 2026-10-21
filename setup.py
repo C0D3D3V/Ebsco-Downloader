@@ -42,6 +42,9 @@ setup(
         'aiofiles>=23.2.1',
         'urllib3',
     ],
+    extras_require={
+        'test': ['pytest'],
+    },
     classifiers=[
         'Development Status :: 5 - Production/Stable',
         'Environment :: Console',

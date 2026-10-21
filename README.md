@@ -74,6 +74,13 @@ If you run into certificate problems you can add `-scv` to the command, so that 
 
 Do you have a great new feature idea or just want to be part of the project? Awesome! Every contribution is welcome!
 
+The tests run the downloader against a local fake EBSCO server, so they need no account and no internet:
+
+```
+pip install -e .[test]
+pytest
+```
+
 
 ## ⚖️ License
 

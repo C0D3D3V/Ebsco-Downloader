@@ -140,7 +140,7 @@ class Ebsco2Downloader:
         self.book_info.base_webview = self.get_url_view(self.download_url)
         self.book_info.on_page_json = json.loads(
             self.first_match(
-                r'<script\s*id="__NEXT_DATA__"\s*type="application/json">({.*})\s*</script>',
+                r'(?s)<script\s*id="__NEXT_DATA__"\s*type="application/json">\s*({.*?})\s*</script>',
                 self.book_info.base_webview,
                 'On page json',
             )
@@ -325,29 +325,21 @@ class Ebsco2Downloader:
         merger.write(str(book_path) + '.pdf')
         merger.close()
 
-    async def get_can_continue_on_fail(self, url, session, old_headers, ssl_context):
-        try:
-            headers = old_headers.copy()
-            headers['Range'] = 'bytes=0-4'
-            async with session.get(url, headers=headers, ssl=ssl_context) as resp:
-                return resp.headers.get('Content-Range') is not None and resp.status == 206
-        except Exception as err:
-            if self.verbose:
-                Log.debug(f"Failed to check if download can be continued on fail: {err}")
-        return False
-
     async def batch_download_pdf_parts(self, page_ids: List[str], book_path: Path) -> List[Path]:
         semaphore = asyncio.Semaphore(self.max_parallel_dl)
-        dl_results = await asyncio.gather(
-            *[self.download_pdf_part(page_id, book_path, semaphore) for page_id in page_ids]
-        )
+        async with self.create_client_session() as session:
+            dl_results = await asyncio.gather(
+                *[self.download_pdf_part(session, semaphore, page_id, book_path) for page_id in page_ids]
+            )
         failed_page_ids = [page_id for page_id, dl_result in zip(page_ids, dl_results) if not dl_result[0]]
         if failed_page_ids:
             Log.error(f'Could not download {", ".join(failed_page_ids)}. Abort! Please try again later!')
             sys.exit(1)
         return [dl_result[1] for dl_result in dl_results]
 
-    async def download_pdf_part(self, page_id: str, book_path: Path, semaphore: asyncio.Semaphore) -> Tuple[bool, Path]:
+    async def download_pdf_part(
+        self, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, page_id: str, book_path: Path
+    ) -> Tuple[bool, Path]:
         """Returns True if the file was successfully downloaded or exists"""
 
         rel_file_path = page_id.rsplit('/', 1)[1]
@@ -361,74 +353,15 @@ class Ebsco2Downloader:
         PT.make_base_dir(local_path)
         # Only complete downloads get the final name, so an aborted run never leaves a broken part behind.
         part_path = local_path + '.part'
-        headers = self.stdHeader.copy()
-
         dl_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe="")}/{self.book_info.checkout_token}'
 
-        received = 0
-        file_obj = None
-        can_continue_on_fail = False
-        finished_successfully = False
-        ssl_context = SslHelper.get_ssl_context(self.skip_cert_verify, True, True)
-        async with semaphore, self.create_client_session() as session:
+        async with semaphore:
             if self.verbose:
                 Log.info(f'Downloading {rel_file_path} from: {dl_url}')
             else:
                 Log.info(f'Downloading {rel_file_path}...')
+            finished_successfully = await self.download_to_file(session, dl_url, part_path, rel_file_path)
 
-            for try_num in range(1, self.max_dl_retries + 1):
-                try:
-                    if try_num > 1 and can_continue_on_fail:
-                        headers["Range"] = f"bytes={received}-"
-                    else:
-                        headers.pop('Range', None)
-                    async with session.get(dl_url, headers=headers, raise_for_status=True, ssl=ssl_context) as resp:
-                        total = int(resp.headers.get("Content-Length", 0))
-                        content_range = resp.headers.get("Content-Range", "")  # Example: bytes 200-1000/67589
-
-                        if try_num > 1 and can_continue_on_fail and not content_range and resp.status != 206:
-                            raise ContentRangeError(
-                                f"Server did not response for {rel_file_path} with requested range data"
-                            )
-                        file_obj = file_obj or await aiofiles.open(part_path, "wb")
-                        chunk = await resp.content.read(1024 * 10)
-                        chunk_idx = 0
-                        while chunk:
-                            received += len(chunk)
-                            if chunk_idx % 100 == 0:
-                                Log.info(f"{rel_file_path} got {format_bytes(received)} / {format_bytes(total)}")
-                            await file_obj.write(chunk)
-                            chunk = await resp.content.read(1024 * 10)
-                            chunk_idx += 1
-
-                    finished_successfully = True
-                    break
-
-                except RETRYABLE_ERRORS as err:
-                    if isinstance(err, ClientResponseError) and err.status not in RETRYABLE_STATUS_CODES:
-                        Log.error(f'{rel_file_path} could not be downloaded: {err.status} {err.message}')
-                        break
-
-                    Log.warning(
-                        f'(Try {try_num} of {self.max_dl_retries})'
-                        f' Unable to download {rel_file_path}: {self.describe_error(err)}'
-                    )
-                    if try_num == 1:
-                        can_continue_on_fail = await self.get_can_continue_on_fail(
-                            dl_url, session, headers, ssl_context
-                        )
-                    if (not can_continue_on_fail and received > 0) or isinstance(err, ContentRangeError):
-                        can_continue_on_fail = False
-                        if file_obj is not None:
-                            await file_obj.close()
-                            file_obj = None
-                        received = 0
-
-                    if try_num < self.max_dl_retries:
-                        await asyncio.sleep(self.retry_delay_seconds(try_num))
-
-        if file_obj is not None:
-            await file_obj.close()
         if not finished_successfully:
             if os.path.exists(part_path):
                 os.unlink(part_path)
@@ -440,6 +373,55 @@ class Ebsco2Downloader:
         else:
             Log.success(f'Successfully downloaded {rel_file_path}')
         return True, local_path_raw
+
+    async def download_to_file(self, session: aiohttp.ClientSession, url: str, file_path: str, name: str) -> bool:
+        """Retries failed tries and resumes where the last try stopped, if the server supports range requests."""
+        ssl_context = SslHelper.get_ssl_context(self.skip_cert_verify, True, True)
+        received = 0
+        async with aiofiles.open(file_path, 'wb') as file_obj:
+
+            async def start_over():
+                nonlocal received
+                await file_obj.seek(0)
+                await file_obj.truncate()
+                received = 0
+
+            for try_num in range(1, self.max_dl_retries + 1):
+                headers = self.stdHeader.copy()
+                if received > 0:
+                    headers['Range'] = f'bytes={received}-'
+                try:
+                    async with session.get(url, headers=headers, raise_for_status=True, ssl=ssl_context) as resp:
+                        content_range = resp.headers.get('Content-Range', '')  # Example: bytes 200-1000/67589
+                        is_resumed = resp.status == 206 and content_range.startswith(f'bytes {received}-')
+                        if received > 0 and not is_resumed:
+                            if resp.status == 206:
+                                raise ContentRangeError(f'Server answered with the wrong range {content_range}')
+                            await start_over()
+
+                        total = received + int(resp.headers.get('Content-Length', 0))
+                        chunk_idx = 0
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            received += len(chunk)
+                            if chunk_idx % 16 == 0:
+                                Log.info(f'{name} got {format_bytes(received)} / {format_bytes(total)}')
+                            chunk_idx += 1
+                            await file_obj.write(chunk)
+                    return True
+
+                except RETRYABLE_ERRORS as err:
+                    if isinstance(err, ClientResponseError) and err.status not in RETRYABLE_STATUS_CODES:
+                        Log.error(f'{name} could not be downloaded: {err.status} {err.message}')
+                        return False
+
+                    Log.warning(
+                        f'(Try {try_num} of {self.max_dl_retries}) Unable to download {name}: {self.describe_error(err)}'
+                    )
+                    if isinstance(err, ContentRangeError):
+                        await start_over()
+                    if try_num < self.max_dl_retries:
+                        await asyncio.sleep(self.retry_delay_seconds(try_num))
+        return False
 
     @staticmethod
     def build_outline(merger, nav_dic, parent=None):
@@ -485,12 +467,13 @@ class Ebsco2Downloader:
 
     async def download_epub_page(
         self,
+        session: aiohttp.ClientSession,
         semaphore: asyncio.Semaphore,
         artifact_url: str,
         artifact_file_path,
         page_file_path: str,
     ):
-        async with semaphore, self.create_client_session() as session:
+        async with semaphore:
             response = await self.fetch_artifact(session, artifact_url)
 
         if not response.ok:
@@ -544,6 +527,7 @@ class Ebsco2Downloader:
 
     async def download_epub_include(
         self,
+        session: aiohttp.ClientSession,
         semaphore: asyncio.Semaphore,
         artifact_url: str,
         artifact_url_path: str,
@@ -551,7 +535,7 @@ class Ebsco2Downloader:
         all_css_includes: List[str],
         skipped_includes: List[str],
     ):
-        async with semaphore, self.create_client_session() as session:
+        async with semaphore:
             try:
                 response = await self.fetch_artifact(session, artifact_url)
             except RETRYABLE_ERRORS as err:
@@ -626,77 +610,79 @@ class Ebsco2Downloader:
         epub_content_files = []
         epub_include_files = []
 
-        page_tasks = []
-        semaphore_pages = asyncio.Semaphore(self.max_parallel_dl)
+        semaphore = asyncio.Semaphore(self.max_parallel_dl)
+        async with self.create_client_session() as session:
+            page_tasks = []
 
-        for page_id in self.book_info.all_pages_ids:
-            page_file_path = page_id
-            artifact_file_path = book_directory / page_id
-            os.makedirs(str(artifact_file_path.parent), exist_ok=True)
-            epub_content_files.append(artifact_file_path)
-
-            artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe="")}/{self.book_info.checkout_token}'
-
-            page_tasks.append(
-                self.download_epub_page(
-                    semaphore_pages,
-                    artifact_url,
-                    artifact_file_path,
-                    page_file_path,
-                )
-            )
-
-        result = await asyncio.gather(*page_tasks)
-
-        # Collect all artifacts
-        for artifact_includes in result:
-            for artifact_include in artifact_includes:
-                if artifact_include not in all_includes:
-                    all_includes.append(artifact_include)
-
-        # Download includes (Images, Stylesheets, Fonts)
-        base_artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/checkout/{self.book_info.checkout_token}/artifact/'
-
-        requested_includes = set()
-        while len(all_includes) > 0:
-            requested_includes.update(all_includes)
-            all_css_includes = []
-            include_tasks = []
-            semaphore_includes = asyncio.Semaphore(self.max_parallel_dl)
-            for artifact_url_path in all_includes:
-                artifact_url = base_artifact_url + artifact_url_path
-
-                artifact_url_parts = urlsplit(artifact_url)
-
-                normalized_path = posixpath.normpath(artifact_url_parts.path)
-
-                artifact_url = urlunsplit(
-                    (
-                        artifact_url_parts.scheme,
-                        artifact_url_parts.netloc,
-                        normalized_path,
-                        artifact_url_parts.query,
-                        artifact_url_parts.fragment,
-                    )
-                )
-
-                artifact_file_path = book_directory / artifact_url_path
+            for page_id in self.book_info.all_pages_ids:
+                page_file_path = page_id
+                artifact_file_path = book_directory / page_id
                 os.makedirs(str(artifact_file_path.parent), exist_ok=True)
+                epub_content_files.append(artifact_file_path)
 
-                epub_include_files.append(artifact_file_path)
-                include_tasks.append(
-                    self.download_epub_include(
-                        semaphore_includes,
+                artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/artifact/{quote(page_id, safe="")}/{self.book_info.checkout_token}'
+
+                page_tasks.append(
+                    self.download_epub_page(
+                        session,
+                        semaphore,
                         artifact_url,
-                        artifact_url_path,
                         artifact_file_path,
-                        all_css_includes,
-                        skipped_includes,
+                        page_file_path,
                     )
                 )
 
-            await asyncio.gather(*include_tasks)
-            all_includes = [include for include in all_css_includes if include not in requested_includes]
+            result = await asyncio.gather(*page_tasks)
+
+            # Collect all artifacts
+            for artifact_includes in result:
+                for artifact_include in artifact_includes:
+                    if artifact_include not in all_includes:
+                        all_includes.append(artifact_include)
+
+            # Download includes (Images, Stylesheets, Fonts)
+            base_artifact_url = f'{self.book_info.on_page_json["runtimeConfig"]["BOOKS_CONTENT_EDGE_CLIENT_URL"]}/v1/checkout/{self.book_info.checkout_token}/artifact/'
+
+            requested_includes = set()
+            while len(all_includes) > 0:
+                requested_includes.update(all_includes)
+                all_css_includes = []
+                include_tasks = []
+                for artifact_url_path in all_includes:
+                    artifact_url = base_artifact_url + artifact_url_path
+
+                    artifact_url_parts = urlsplit(artifact_url)
+
+                    normalized_path = posixpath.normpath(artifact_url_parts.path)
+
+                    artifact_url = urlunsplit(
+                        (
+                            artifact_url_parts.scheme,
+                            artifact_url_parts.netloc,
+                            normalized_path,
+                            artifact_url_parts.query,
+                            artifact_url_parts.fragment,
+                        )
+                    )
+
+                    artifact_file_path = book_directory / artifact_url_path
+                    os.makedirs(str(artifact_file_path.parent), exist_ok=True)
+
+                    epub_include_files.append(artifact_file_path)
+                    include_tasks.append(
+                        self.download_epub_include(
+                            session,
+                            semaphore,
+                            artifact_url,
+                            artifact_url_path,
+                            artifact_file_path,
+                            all_css_includes,
+                            skipped_includes,
+                        )
+                    )
+
+                await asyncio.gather(*include_tasks)
+                all_includes = [include for include in all_css_includes if include not in requested_includes]
 
         # Compose E-Pub
         epub_path = str(book_directory) + '.epub'
